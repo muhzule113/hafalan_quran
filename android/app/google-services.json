@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "988752166321",
+    "project_id": "hafalan-quran-f2816",
+    "storage_bucket": "hafalan-quran-f2816.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:988752166321:android:eb9fa50e26db4680f9d190",
+        "android_client_info": {
+          "package_name": "com.pesantren.hafalan_quran"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAKVuZsD-lHUxKYb7dAAvJwp2KpjeOS9Dg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
