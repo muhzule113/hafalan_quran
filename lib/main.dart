@@ -64,16 +64,13 @@ class _AuthGateState extends State<AuthGate> {
     final session = Supabase.instance.client.auth.currentSession;
     if (session == null) return;
 
-    await NotificationService.init();
-
-    if (!mounted) return;
-
-    // Init notifikasi setelah login
     try {
       await NotificationService.init();
     } catch (e) {
       print('Notif init error: $e');
     }
+
+    if (!mounted) return;
 
     Navigator.pushReplacement(context, FadeRoute(page: const LoginScreen()));
   }

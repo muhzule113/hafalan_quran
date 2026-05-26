@@ -1,0 +1,91 @@
+PANDUAN CLONE & BUILD HAFALAN QURAN
+====================================
+
+A. PRASYARAT
+------------
+1. Install Flutter SDK (minimal versi 3.11.0)
+2. Install Android Studio / Visual Studio Code
+3. Install Git
+4. Setup Android SDK (minimal API 34)
+5. Setup Java JDK 17
+
+B. CLONE REPOSITORY
+-------------------
+1. Buka terminal (Command Prompt / PowerShell / Git Bash)
+2. Clone project:
+   git clone https://github.com/username/hafalan_quran.git
+   cd hafalan_quran
+
+3. Install dependencies:
+   flutter pub get
+
+C. KONFIGURASI ANDROID
+----------------------
+1. Generate keystore (hanya sekali):
+   keytool -genkey -v -keystore android/app/hafalan-quran.keystore ^
+     -alias hafalanquran -keyalg RSA -keysize 2048 -validity 10000
+
+   Isi password dan data yang diminta.
+
+2. Buat file android/key.properties:
+   storePassword=<password_dari_keystore>
+   keyPassword=<password_dari_keystore>
+   keyAlias=hafalanquran
+   storeFile=app\\hafalan-quran.keystore
+
+D. KONFIGURASI FIREBASE
+-----------------------
+1. Buat project di Firebase Console (https://console.firebase.google.com)
+2. Download google-services.json untuk Android
+3. Letakkan di: android/app/google-services.json
+4. Download GoogleService-Info.plist untuk iOS
+5. Letakkan di: ios/Runner/GoogleService-Info.plist
+
+E. KONFIGURASI SUPABASE
+-----------------------
+1. Buat file .env di root project (isi dari developer):
+   SUPABASE_URL=https://xxx.supabase.co
+   SUPABASE_ANON_KEY=xxxxx
+
+F. BUILD APK RELEASE
+--------------------
+   flutter build apk --release
+
+   Hasil build: build/app/outputs/flutter-apk/app-release.apk
+
+G. BUILD APP BUNDLE (untuk Play Store)
+--------------------------------------
+   flutter build appbundle --release
+
+   Hasil build: build/app/outputs/bundle/release/app-release.aab
+
+H. BUILD IOS
+------------
+   cd ios
+   pod install
+   cd ..
+   flutter build ios --release
+
+I. TROUBLESHOOTING
+------------------
+1. "keystore file not found"
+   -> Jalankan ulang langkah C.1-C.2
+
+2. "Kotlin version mismatch"
+   -> Cek version di android/settings.gradle.kts, pastikan valid
+
+3. "Firebase not configured"
+   -> Pastikan google-services.json ada di android/app/
+
+4. "Podfile not found"
+   -> cd ios && pod init && pod install
+
+5. "Missing .env file"
+   -> Buat file .env dari developer (jangan commit ke git)
+
+J. CATATAN PENTING
+------------------
+- File .env berisi credentials Supabase, JANGAN di-commit ke Git
+- File android/key.properties berisi password keystore, JANGAN di-commit
+- File android/app/hafalan-quran.keystore adalah key signing, JANGAN di-commit
+- Simpan keystore di tempat aman, jika hilang tidak bisa update aplikasi

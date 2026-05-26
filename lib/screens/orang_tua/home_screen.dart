@@ -40,9 +40,8 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   @override
   void initState() {
     super.initState();
-    _player.closePlayer();
     _tabController = TabController(length: 3, vsync: this);
-    _initPlayer(); // ← tambahkan
+    _initPlayer();
     _loadData();
   }
 
@@ -229,6 +228,7 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _player.closePlayer();
     super.dispose();
   }
 
@@ -360,7 +360,6 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                         color: AppColors.textSecondary,
                       ),
                       onPressed: () async {
-                        await supabase.auth.signOut();
                         final confirm = await KonfirmasiDialog.logout(context);
                         if (confirm && context.mounted) {
                           await supabase.auth.signOut();

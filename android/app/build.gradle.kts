@@ -25,8 +25,8 @@ android {
 
     signingConfigs {
         create("release") {
-            val keystoreFile = file("/home/muhdev/Projects/hafalan_quran/android/app/hafalan-quran.keystore")
-            val propsFile = file("/home/muhdev/Projects/hafalan_quran/android/key.properties")
+            val keystoreFile = file("../app/hafalan-quran.keystore")
+            val propsFile = file("../key.properties")
             if (propsFile.exists() && keystoreFile.exists()) {
                 val props = Properties()
                 props.load(FileInputStream(propsFile))

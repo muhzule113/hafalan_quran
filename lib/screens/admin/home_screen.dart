@@ -156,14 +156,12 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
                             color: AppColors.textSecondary,
                           ),
                           onPressed: () async {
-                            await supabase.auth.signOut();
                             final confirm = await KonfirmasiDialog.logout(context);
                             if (confirm && context.mounted) {
                               await supabase.auth.signOut();
                               Navigator.pushReplacement(
                                 context,
-                                FadeRoute(page: const LoginScreen(),
-                                ),
+                                FadeRoute(page: const LoginScreen()),
                               );
                             }
                           },
