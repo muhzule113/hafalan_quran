@@ -8,6 +8,19 @@ import '../profil/profil_screen.dart';
 import '../../widgets/grafik_perkembangan.dart';
 import '../../widgets/konfirmasi_dialog.dart';
 import '../../utils/app_routes.dart';
+import '../../utils/app_snackbar.dart';
+
+@visibleForTesting
+List<Map<String, dynamic>> notificationsWithReadState(
+  List<Map<String, dynamic>> notifications,
+  Object notificationId,
+  bool isRead,
+) => [
+  for (final notification in notifications)
+    notification['id'] == notificationId
+        ? {...notification, 'dibaca': isRead}
+        : notification,
+];
 
 class OrangTuaHomeScreen extends StatefulWidget {
   const OrangTuaHomeScreen({super.key});
@@ -92,15 +105,45 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         await _loadSetoran(santriData['id']);
         await _loadProgress(santriData['id']);
       }
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
-      // Tandai semua notif dibaca
+  Future<void> _markNotificationAsRead(
+    Map<String, dynamic> notification,
+  ) async {
+    if (notification['dibaca'] != false) return;
+
+    final notificationId = notification['id'];
+    final userId = supabase.auth.currentUser?.id;
+    if (notificationId == null || userId == null) {
+      AppSnackbar.error(context, 'Notifikasi tidak dapat diperbarui');
+      return;
+    }
+
+    setState(() {
+      _notifList = notificationsWithReadState(_notifList, notificationId, true);
+      _unreadCount = _notifList.where((n) => n['dibaca'] == false).length;
+    });
+
+    try {
       await supabase
           .from('notifikasi')
           .update({'dibaca': true})
-          .eq('orang_tua_id', userId)
-          .eq('dibaca', false);
-    } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
+          .eq('id', notificationId)
+          .eq('orang_tua_id', userId);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _notifList = notificationsWithReadState(
+          _notifList,
+          notificationId,
+          false,
+        );
+        _unreadCount = _notifList.where((n) => n['dibaca'] == false).length;
+      });
+      AppSnackbar.error(context, 'Gagal menandai notifikasi sebagai dibaca');
     }
   }
 
@@ -633,86 +676,118 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         itemBuilder: (_, index) {
           final notif = _notifList[index];
           final belumDibaca = notif['dibaca'] == false;
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
+          return Semantics(
+            button: belumDibaca,
+            onTapHint: belumDibaca ? 'Tandai sudah dibaca' : null,
+            child: Material(
               color: belumDibaca
                   ? AppColors.gold.withOpacity(0.06)
                   : Colors.white.withOpacity(0.03),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: belumDibaca
-                    ? AppColors.gold.withOpacity(0.25)
-                    : Colors.white.withOpacity(0.07),
-              ),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: AppColors.green.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.menu_book_rounded,
-                    color: AppColors.greenLight,
-                    size: 20,
-                  ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(
+                  color: belumDibaca
+                      ? AppColors.gold.withOpacity(0.25)
+                      : Colors.white.withOpacity(0.07),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: belumDibaca
+                    ? () => _markNotificationAsRead(notif)
+                    : null,
+                borderRadius: BorderRadius.circular(16),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              notif['judul'],
-                              style: TextStyle(
-                                color: AppColors.textPrimary,
-                                fontWeight: belumDibaca
-                                    ? FontWeight.w700
-                                    : FontWeight.w600,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                          if (belumDibaca)
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: const BoxDecoration(
-                                color: AppColors.gold,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        notif['pesan'],
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: AppColors.textSecondary,
-                          height: 1.4,
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: AppColors.green.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.menu_book_rounded,
+                          color: AppColors.greenLight,
+                          size: 20,
                         ),
                       ),
-                      const SizedBox(height: 6),
-                      Text(
-                        _timeAgo(notif['created_at']),
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: AppColors.textMuted,
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    notif['judul'],
+                                    style: TextStyle(
+                                      color: AppColors.textPrimary,
+                                      fontWeight: belumDibaca
+                                          ? FontWeight.w700
+                                          : FontWeight.w600,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                                if (belumDibaca)
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: AppColors.gold,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              notif['pesan'],
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textPrimary.withValues(
+                                  alpha: 0.72,
+                                ),
+                                height: 1.4,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              _timeAgo(notif['created_at']),
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: AppColors.textPrimary.withValues(
+                                  alpha: 0.65,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              belumDibaca
+                                  ? 'Ketuk untuk tandai dibaca'
+                                  : 'Sudah dibaca',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: belumDibaca
+                                    ? AppColors.gold
+                                    : AppColors.textPrimary.withValues(
+                                        alpha: 0.65,
+                                      ),
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
                   ),
                 ),
-              ],
+              ),
             ),
           );
         },

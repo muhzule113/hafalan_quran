@@ -2,6 +2,8 @@
 
 A new Flutter project.
 
+Dokumentasi diagram aktivitas per fitur tersedia di [docs/activity-diagrams.md](docs/activity-diagrams.md).
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.
