@@ -76,14 +76,19 @@ class _LoginScreenState extends State<LoginScreen>
         try {
           await NotificationService.init();
         } catch (_) {}
+        if (!mounted) return;
         final role = profile['role'];
         Widget home;
-        if (role == 'admin')
+        if (role == 'admin') {
           home = const AdminHomeScreen();
-        else if (role == 'ustadz')
+        } else if (role == 'ustadz') {
           home = const UstadzHomeScreen();
-        else
+        } else {
           home = const OrangTuaHomeScreen();
+        }
+        if (role != 'orang_tua') {
+          NotificationService.clearPendingSetoranId();
+        }
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => home),

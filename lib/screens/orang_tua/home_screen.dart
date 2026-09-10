@@ -9,6 +9,8 @@ import '../../widgets/grafik_perkembangan.dart';
 import '../../widgets/konfirmasi_dialog.dart';
 import '../../utils/app_routes.dart';
 import '../../utils/app_snackbar.dart';
+import '../../services/notification_service.dart';
+import 'setoran_detail_screen.dart';
 
 @visibleForTesting
 List<Map<String, dynamic>> notificationsWithReadState(
@@ -21,6 +23,70 @@ List<Map<String, dynamic>> notificationsWithReadState(
         ? {...notification, 'dibaca': isRead}
         : notification,
 ];
+
+class NotificationSetoranTapTarget extends StatelessWidget {
+  final Map<String, dynamic> notification;
+  final ValueChanged<String> onOpen;
+  final VoidCallback? onUnavailable;
+  final Widget child;
+
+  const NotificationSetoranTapTarget({
+    super.key,
+    required this.notification,
+    required this.onOpen,
+    required this.child,
+    this.onUnavailable,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      onTapHint: 'Buka detail setoran',
+      child: InkWell(
+        onTap: () {
+          final id = notificationSetoranId(notification);
+          if (id == null) {
+            onUnavailable?.call();
+          } else {
+            onOpen(id);
+          }
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: child,
+      ),
+    );
+  }
+}
+
+class SetoranHistoryTapTarget extends StatelessWidget {
+  final Map<String, dynamic> setoran;
+  final ValueChanged<String> onOpen;
+  final Widget child;
+
+  const SetoranHistoryTapTarget({
+    super.key,
+    required this.setoran,
+    required this.onOpen,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      onTapHint: 'Buka detail setoran',
+      child: InkWell(
+        onTap: () {
+          final id = setoran['id']?.toString().trim();
+          if (id != null && id.isNotEmpty) onOpen(id);
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: child,
+      ),
+    );
+  }
+}
 
 class OrangTuaHomeScreen extends StatefulWidget {
   const OrangTuaHomeScreen({super.key});
@@ -49,11 +115,13 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   bool _playerReady = false;
   String? _playingId;
   bool _isPlaying = false;
+  bool _openingSetoran = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    NotificationService.pendingSetoranId.addListener(_onPendingSetoranChanged);
     _initPlayer();
     _loadData();
   }
@@ -98,6 +166,9 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
           _unreadCount = _notifList.where((n) => n['dibaca'] == false).length;
           _isLoading = false;
         });
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _onPendingSetoranChanged(),
+        );
       }
 
       // Load setoran & progress kalau ada santri
@@ -145,6 +216,49 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
       });
       AppSnackbar.error(context, 'Gagal menandai notifikasi sebagai dibaca');
     }
+  }
+
+  void _onPendingSetoranChanged() {
+    if (!mounted ||
+        _isLoading ||
+        _openingSetoran ||
+        NotificationService.pendingSetoranId.value == null) {
+      return;
+    }
+    if (_santri == null) {
+      NotificationService.takePendingSetoranId();
+      AppSnackbar.error(context, 'Setoran tidak tersedia');
+      return;
+    }
+    final id = NotificationService.takePendingSetoranId();
+    if (id != null) _openSetoran(id);
+  }
+
+  Future<void> _openSetoran(String setoranId) async {
+    final santriId = _santri?['id']?.toString();
+    if (!mounted || santriId == null || santriId.isEmpty || _openingSetoran) {
+      return;
+    }
+
+    _openingSetoran = true;
+    await Navigator.push(
+      context,
+      SlideRoute(
+        page: SetoranDetailScreen(setoranId: setoranId, santriId: santriId),
+      ),
+    );
+    _openingSetoran = false;
+    _onPendingSetoranChanged();
+  }
+
+  void _openNotification(Map<String, dynamic> notification, String setoranId) {
+    _markNotificationAsRead(notification);
+    _openSetoran(setoranId);
+  }
+
+  void _notificationUnavailable(Map<String, dynamic> notification) {
+    _markNotificationAsRead(notification);
+    AppSnackbar.error(context, 'Setoran tidak tersedia');
   }
 
   Future<void> _loadSetoran(String santriId, {bool loadMore = false}) async {
@@ -270,6 +384,9 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
 
   @override
   void dispose() {
+    NotificationService.pendingSetoranId.removeListener(
+      _onPendingSetoranChanged,
+    );
     _tabController.dispose();
     _player.closePlayer();
     super.dispose();
@@ -676,116 +793,111 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         itemBuilder: (_, index) {
           final notif = _notifList[index];
           final belumDibaca = notif['dibaca'] == false;
-          return Semantics(
-            button: belumDibaca,
-            onTapHint: belumDibaca ? 'Tandai sudah dibaca' : null,
-            child: Material(
-              color: belumDibaca
-                  ? AppColors.gold.withOpacity(0.06)
-                  : Colors.white.withOpacity(0.03),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: BorderSide(
-                  color: belumDibaca
-                      ? AppColors.gold.withOpacity(0.25)
-                      : Colors.white.withOpacity(0.07),
-                ),
+          return Material(
+            color: belumDibaca
+                ? AppColors.gold.withOpacity(0.06)
+                : Colors.white.withOpacity(0.03),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(
+                color: belumDibaca
+                    ? AppColors.gold.withOpacity(0.25)
+                    : Colors.white.withOpacity(0.07),
               ),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: belumDibaca
-                    ? () => _markNotificationAsRead(notif)
-                    : null,
-                borderRadius: BorderRadius.circular(16),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: AppColors.green.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.menu_book_rounded,
-                          color: AppColors.greenLight,
-                          size: 20,
-                        ),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: NotificationSetoranTapTarget(
+              notification: notif,
+              onOpen: (id) => _openNotification(notif, id),
+              onUnavailable: () => _notificationUnavailable(notif),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: AppColors.green.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    notif['judul'],
-                                    style: TextStyle(
-                                      color: AppColors.textPrimary,
-                                      fontWeight: belumDibaca
-                                          ? FontWeight.w700
-                                          : FontWeight.w600,
-                                      fontSize: 13,
-                                    ),
+                      child: const Icon(
+                        Icons.menu_book_rounded,
+                        color: AppColors.greenLight,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  notif['judul'],
+                                  style: TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontWeight: belumDibaca
+                                        ? FontWeight.w700
+                                        : FontWeight.w600,
+                                    fontSize: 13,
                                   ),
                                 ),
-                                if (belumDibaca)
-                                  Container(
-                                    width: 8,
-                                    height: 8,
-                                    decoration: const BoxDecoration(
-                                      color: AppColors.gold,
-                                      shape: BoxShape.circle,
-                                    ),
+                              ),
+                              if (belumDibaca)
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: const BoxDecoration(
+                                    color: AppColors.gold,
+                                    shape: BoxShape.circle,
                                   ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              notif['pesan'],
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.textPrimary.withValues(
-                                  alpha: 0.72,
                                 ),
-                                height: 1.4,
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            notif['pesan'],
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textPrimary.withValues(
+                                alpha: 0.72,
+                              ),
+                              height: 1.4,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _timeAgo(notif['created_at']),
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: AppColors.textPrimary.withValues(
+                                alpha: 0.65,
                               ),
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              _timeAgo(notif['created_at']),
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: AppColors.textPrimary.withValues(
-                                  alpha: 0.65,
-                                ),
-                              ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            belumDibaca
+                                ? 'Ketuk untuk buka setoran'
+                                : 'Ketuk untuk buka kembali',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: belumDibaca
+                                  ? AppColors.gold
+                                  : AppColors.textPrimary.withValues(
+                                      alpha: 0.65,
+                                    ),
+                              fontWeight: FontWeight.w500,
                             ),
-                            const SizedBox(height: 3),
-                            Text(
-                              belumDibaca
-                                  ? 'Ketuk untuk tandai dibaca'
-                                  : 'Sudah dibaca',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: belumDibaca
-                                    ? AppColors.gold
-                                    : AppColors.textPrimary.withValues(
-                                        alpha: 0.65,
-                                      ),
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -862,205 +974,211 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                 itemBuilder: (_, index) {
                   final s = _setoranList[index];
                   final hasPenilaian = s['nilai_tajwid'] != null;
-                  return Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.03),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white.withOpacity(0.07)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${s['surah']} · ${s['ayat_mulai']}-${s['ayat_selesai']}',
-                                    style: const TextStyle(
-                                      color: AppColors.textPrimary,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    _timeAgo(s['tanggal']),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textSecondary,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: _statusColor(
-                                  s['status'],
-                                ).withOpacity(0.15),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: _statusColor(
-                                    s['status'],
-                                  ).withOpacity(0.3),
-                                ),
-                              ),
-                              child: Text(
-                                _statusLabel(s['status']),
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: _statusColor(s['status']),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
+                  return SetoranHistoryTapTarget(
+                    setoran: s,
+                    onOpen: _openSetoran,
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.03),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.07),
                         ),
-                        if (hasPenilaian) ...[
-                          const SizedBox(height: 10),
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: AppColors.purple.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: AppColors.purple.withOpacity(0.2),
-                              ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Penilaian Ustadz',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: AppColors.textSecondary,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Row(
-                                  children: [
-                                    _NilaiRow(
-                                      label: 'Kelancaran',
-                                      nilai: s['nilai_kelancaran'] ?? 0,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    _NilaiRow(
-                                      label: 'Tajwid',
-                                      nilai: s['nilai_tajwid'] ?? 0,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    _NilaiRow(
-                                      label: 'Makhraj',
-                                      nilai: s['nilai_makhraj'] ?? 0,
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      'Rata-rata',
+                                      '${s['surah']} · ${s['ayat_mulai']}-${s['ayat_selesai']}',
+                                      style: const TextStyle(
+                                        color: AppColors.textPrimary,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      _timeAgo(s['tanggal']),
                                       style: TextStyle(
                                         fontSize: 11,
                                         color: AppColors.textSecondary,
                                       ),
                                     ),
-                                    Text(
-                                      '${(((s['nilai_kelancaran'] ?? 0) + (s['nilai_tajwid'] ?? 0) + (s['nilai_makhraj'] ?? 0)) / 3).toStringAsFixed(1)} / 5.0',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: AppColors.gold,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
                                   ],
                                 ),
-                              ],
-                            ),
-                          ),
-                        ],
-                        if (s['catatan'] != null &&
-                            s['catatan'].toString().isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Text(
-                            s['catatan'],
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: AppColors.textSecondary,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          ),
-                        ],
-                        // Setelah bagian catatan (if s['catatan']...)
-                        // ← Tambahkan tombol audio di sini
-                        if (s['audio_url'] != null) ...[
-                          const SizedBox(height: 10),
-                          GestureDetector(
-                            onTap: () => _togglePlay(s['id'], s['audio_url']),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 8,
                               ),
-                              decoration: BoxDecoration(
-                                color: _playingId == s['id']
-                                    ? AppColors.gold.withOpacity(0.15)
-                                    : Colors.white.withOpacity(0.05),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: _playingId == s['id']
-                                      ? AppColors.gold.withOpacity(0.4)
-                                      : Colors.white.withOpacity(0.1),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _statusColor(
+                                    s['status'],
+                                  ).withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: _statusColor(
+                                      s['status'],
+                                    ).withOpacity(0.3),
+                                  ),
+                                ),
+                                child: Text(
+                                  _statusLabel(s['status']),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: _statusColor(s['status']),
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                              child: Row(
+                            ],
+                          ),
+                          if (hasPenilaian) ...[
+                            const SizedBox(height: 10),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: AppColors.purple.withOpacity(0.08),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: AppColors.purple.withOpacity(0.2),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Icon(
-                                    _playingId == s['id'] && _isPlaying
-                                        ? Icons.stop_rounded
-                                        : Icons.play_arrow_rounded,
-                                    color: _playingId == s['id']
-                                        ? AppColors.gold
-                                        : AppColors.textSecondary,
-                                    size: 18,
-                                  ),
-                                  const SizedBox(width: 8),
                                   Text(
-                                    _playingId == s['id'] && _isPlaying
-                                        ? 'Hentikan Audio'
-                                        : 'Putar Bacaan',
+                                    'Penilaian Ustadz',
                                     style: TextStyle(
-                                      fontSize: 12,
-                                      color: _playingId == s['id']
-                                          ? AppColors.gold
-                                          : AppColors.textSecondary,
-                                      fontWeight: FontWeight.w500,
+                                      fontSize: 10,
+                                      color: AppColors.textSecondary,
+                                      fontWeight: FontWeight.w600,
                                     ),
                                   ),
-                                  const Spacer(),
-                                  Icon(
-                                    Icons.headphones_rounded,
-                                    color: AppColors.textMuted,
-                                    size: 14,
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    children: [
+                                      _NilaiRow(
+                                        label: 'Kelancaran',
+                                        nilai: s['nilai_kelancaran'] ?? 0,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      _NilaiRow(
+                                        label: 'Tajwid',
+                                        nilai: s['nilai_tajwid'] ?? 0,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      _NilaiRow(
+                                        label: 'Makhraj',
+                                        nilai: s['nilai_makhraj'] ?? 0,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'Rata-rata',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: AppColors.textSecondary,
+                                        ),
+                                      ),
+                                      Text(
+                                        '${(((s['nilai_kelancaran'] ?? 0) + (s['nilai_tajwid'] ?? 0) + (s['nilai_makhraj'] ?? 0)) / 3).toStringAsFixed(1)} / 5.0',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: AppColors.gold,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
                             ),
-                          ),
+                          ],
+                          if (s['catatan'] != null &&
+                              s['catatan'].toString().isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              s['catatan'],
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textSecondary,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ],
+                          // Setelah bagian catatan (if s['catatan']...)
+                          // ← Tambahkan tombol audio di sini
+                          if (s['audio_url'] != null) ...[
+                            const SizedBox(height: 10),
+                            GestureDetector(
+                              onTap: () => _togglePlay(s['id'], s['audio_url']),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _playingId == s['id']
+                                      ? AppColors.gold.withOpacity(0.15)
+                                      : Colors.white.withOpacity(0.05),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: _playingId == s['id']
+                                        ? AppColors.gold.withOpacity(0.4)
+                                        : Colors.white.withOpacity(0.1),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      _playingId == s['id'] && _isPlaying
+                                          ? Icons.stop_rounded
+                                          : Icons.play_arrow_rounded,
+                                      color: _playingId == s['id']
+                                          ? AppColors.gold
+                                          : AppColors.textSecondary,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _playingId == s['id'] && _isPlaying
+                                          ? 'Hentikan Audio'
+                                          : 'Putar Bacaan',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: _playingId == s['id']
+                                            ? AppColors.gold
+                                            : AppColors.textSecondary,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Icon(
+                                      Icons.headphones_rounded,
+                                      color: AppColors.textMuted,
+                                      size: 14,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   );
                 },

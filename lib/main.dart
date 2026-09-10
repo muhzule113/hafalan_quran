@@ -6,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
 import 'theme/app_theme.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/orang_tua/home_screen.dart';
 import 'services/notification_service.dart';
 import 'utils/app_routes.dart';
 
@@ -72,7 +73,26 @@ class _AuthGateState extends State<AuthGate> {
 
     if (!mounted) return;
 
-    Navigator.pushReplacement(context, FadeRoute(page: const LoginScreen()));
+    Widget destination = const LoginScreen();
+    if (NotificationService.pendingSetoranId.value != null) {
+      try {
+        final profile = await Supabase.instance.client
+            .from('profiles')
+            .select('role')
+            .eq('id', session.user.id)
+            .single();
+        if (profile['role'] == 'orang_tua') {
+          destination = const OrangTuaHomeScreen();
+        } else {
+          NotificationService.clearPendingSetoranId();
+        }
+      } catch (_) {
+        destination = const LoginScreen();
+      }
+    }
+
+    if (!mounted) return;
+    Navigator.pushReplacement(context, FadeRoute(page: destination));
   }
 
   @override
