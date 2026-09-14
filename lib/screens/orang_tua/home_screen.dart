@@ -469,41 +469,6 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                         ],
                       ),
                     ),
-                    // Notif badge + logout
-                    Stack(
-                      children: [
-                        IconButton(
-                          icon: const Icon(
-                            Icons.notifications_outlined,
-                            color: AppColors.textSecondary,
-                          ),
-                          onPressed: () => _tabController.animateTo(0),
-                        ),
-                        if (_unreadCount > 0)
-                          Positioned(
-                            right: 8,
-                            top: 8,
-                            child: Container(
-                              width: 16,
-                              height: 16,
-                              decoration: const BoxDecoration(
-                                color: Colors.red,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Center(
-                                child: Text(
-                                  '$_unreadCount',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
                     IconButton(
                       icon: const Icon(
                         Icons.person_rounded,
