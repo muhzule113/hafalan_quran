@@ -24,6 +24,26 @@ List<Map<String, dynamic>> notificationsWithReadState(
         : notification,
 ];
 
+@visibleForTesting
+Future<void> openAfterNotificationRead({
+  required Future<void> Function() markAsRead,
+  required Future<void> Function() open,
+}) async {
+  await markAsRead();
+  await open();
+}
+
+@visibleForTesting
+Map<String, dynamic>? notificationForSetoran(
+  List<Map<String, dynamic>> notifications,
+  String setoranId,
+) {
+  for (final notification in notifications) {
+    if (notificationSetoranId(notification) == setoranId) return notification;
+  }
+  return null;
+}
+
 class NotificationSetoranTapTarget extends StatelessWidget {
   final Map<String, dynamic> notification;
   final ValueChanged<String> onOpen;
@@ -199,11 +219,17 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     });
 
     try {
-      await supabase
+      final updated = await supabase
           .from('notifikasi')
           .update({'dibaca': true})
           .eq('id', notificationId)
-          .eq('orang_tua_id', userId);
+          .eq('orang_tua_id', userId)
+          .select('id');
+      if (updated.isEmpty) {
+        throw StateError(
+          'Notifikasi tidak ditemukan atau tidak dapat diperbarui',
+        );
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -225,13 +251,20 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         NotificationService.pendingSetoranId.value == null) {
       return;
     }
+    final id = NotificationService.takePendingSetoranId();
+    if (id != null) _handlePendingSetoran(id);
+  }
+
+  Future<void> _handlePendingSetoran(String setoranId) async {
+    final notification = notificationForSetoran(_notifList, setoranId);
+    if (notification != null) await _markNotificationAsRead(notification);
+
+    if (!mounted) return;
     if (_santri == null) {
-      NotificationService.takePendingSetoranId();
       AppSnackbar.error(context, 'Setoran tidak tersedia');
       return;
     }
-    final id = NotificationService.takePendingSetoranId();
-    if (id != null) _openSetoran(id);
+    await _openSetoran(setoranId);
   }
 
   Future<void> _openSetoran(String setoranId) async {
@@ -251,13 +284,21 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     _onPendingSetoranChanged();
   }
 
-  void _openNotification(Map<String, dynamic> notification, String setoranId) {
-    _markNotificationAsRead(notification);
-    _openSetoran(setoranId);
+  Future<void> _openNotification(
+    Map<String, dynamic> notification,
+    String setoranId,
+  ) {
+    return openAfterNotificationRead(
+      markAsRead: () => _markNotificationAsRead(notification),
+      open: () => _openSetoran(setoranId),
+    );
   }
 
-  void _notificationUnavailable(Map<String, dynamic> notification) {
-    _markNotificationAsRead(notification);
+  Future<void> _notificationUnavailable(
+    Map<String, dynamic> notification,
+  ) async {
+    await _markNotificationAsRead(notification);
+    if (!mounted) return;
     AppSnackbar.error(context, 'Setoran tidak tersedia');
   }
 
