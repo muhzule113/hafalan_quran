@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/supabase_client.dart';
+import '../../utils/search_utils.dart';
 import 'form_user_screen.dart';
 import 'detail_ustadz_screen.dart'; // ← TAMBAH INI
 
@@ -15,6 +16,16 @@ class KelolaUstadzScreen extends StatefulWidget {
 class _KelolaUstadzScreenState extends State<KelolaUstadzScreen> {
   List<Map<String, dynamic>> _list = [];
   bool _isLoading = true;
+  String _searchQuery = '';
+
+  List<Map<String, dynamic>> get _filteredList => filterAdminRecords(
+        _list,
+        _searchQuery,
+        getSearchFields: (ustadz) => [
+          ustadz['nama']?.toString(),
+          ustadz['no_hp']?.toString(),
+        ],
+      );
 
   @override
   void initState() {
@@ -157,6 +168,8 @@ class _KelolaUstadzScreenState extends State<KelolaUstadzScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final filteredList = _filteredList;
+
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -228,6 +241,27 @@ class _KelolaUstadzScreenState extends State<KelolaUstadzScreen> {
                 ),
               ),
               const SizedBox(height: 20),
+              if (!_isLoading && _list.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+                  child: TextField(
+                    style: const TextStyle(color: AppColors.textPrimary),
+                    onChanged: (query) =>
+                        setState(() => _searchQuery = query),
+                    decoration: const InputDecoration(
+                      hintText: 'Cari ustadz...',
+                      hintStyle: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 13,
+                      ),
+                      prefixIcon: Icon(
+                        Icons.search_rounded,
+                        color: AppColors.textSecondary,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ),
               Expanded(
                 child: _isLoading
                     ? const Center(
@@ -251,17 +285,35 @@ class _KelolaUstadzScreenState extends State<KelolaUstadzScreen> {
                           ],
                         ),
                       )
+                    : filteredList.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.search_off_rounded,
+                              size: 48,
+                              color: AppColors.textMuted,
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Ustadz tidak ditemukan',
+                              style: TextStyle(color: AppColors.textSecondary),
+                            ),
+                          ],
+                        ),
+                      )
                     : RefreshIndicator(
                         color: AppColors.gold,
                         backgroundColor: AppColors.bgCard,
                         onRefresh: _load,
                         child: ListView.separated(
                           padding: const EdgeInsets.fromLTRB(24, 0, 24, 100),
-                          itemCount: _list.length,
+                          itemCount: filteredList.length,
                           separatorBuilder: (_, __) =>
                               const SizedBox(height: 10),
                           itemBuilder: (_, index) {
-                            final item = _list[index];
+                            final item = filteredList[index];
 
                             // ─── BUNGKUS DENGAN GESTUREDETECTOR ───
                             return GestureDetector(

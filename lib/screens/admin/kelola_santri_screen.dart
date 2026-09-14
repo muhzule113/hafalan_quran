@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/supabase_client.dart';
+import '../../utils/search_utils.dart';
 import 'detail_santri_screen.dart'; // ← TAMBAHAN
 
 class KelolaSantriScreen extends StatefulWidget {
@@ -14,6 +15,18 @@ class KelolaSantriScreen extends StatefulWidget {
 class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
   List<Map<String, dynamic>> _santriList = [];
   bool _isLoading = true;
+  String _searchQuery = '';
+
+  List<Map<String, dynamic>> get _filteredSantriList => filterAdminRecords(
+        _santriList,
+        _searchQuery,
+        getSearchFields: (santri) => [
+          santri['nama']?.toString(),
+          santri['kelas']?.toString(),
+          santri['kamar']?.toString(),
+          santri['nama_wali']?.toString(),
+        ],
+      );
 
   @override
   void initState() {
@@ -174,6 +187,8 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final filteredSantriList = _filteredSantriList;
+
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -234,6 +249,28 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
 
               const SizedBox(height: 20),
 
+              if (!_isLoading && _santriList.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+                  child: TextField(
+                    style: const TextStyle(color: AppColors.textPrimary),
+                    onChanged: (query) =>
+                        setState(() => _searchQuery = query),
+                    decoration: const InputDecoration(
+                      hintText: 'Cari santri...',
+                      hintStyle: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 13,
+                      ),
+                      prefixIcon: Icon(
+                        Icons.search_rounded,
+                        color: AppColors.textSecondary,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ),
+
               Expanded(
                 child: _isLoading
                     ? const Center(
@@ -253,6 +290,20 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
                               ],
                             ),
                           )
+                        : filteredSantriList.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.search_off_rounded,
+                                        size: 48, color: AppColors.textMuted),
+                                    const SizedBox(height: 12),
+                                    Text('Santri tidak ditemukan',
+                                        style: TextStyle(
+                                            color: AppColors.textSecondary)),
+                                  ],
+                                ),
+                              )
                         : RefreshIndicator(
                             color: AppColors.gold,
                             backgroundColor: AppColors.bgCard,
@@ -260,11 +311,11 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
                             child: ListView.separated(
                               padding:
                                   const EdgeInsets.fromLTRB(24, 0, 24, 100),
-                              itemCount: _santriList.length,
+                              itemCount: filteredSantriList.length,
                               separatorBuilder: (_, __) =>
                                   const SizedBox(height: 10),
                               itemBuilder: (context, index) {
-                                final s = _santriList[index];
+                                final s = filteredSantriList[index];
                                 // ↓ DIMODIFIKASI: bungkus dengan GestureDetector
                                 return GestureDetector(
                                   onTap: () => Navigator.push(
