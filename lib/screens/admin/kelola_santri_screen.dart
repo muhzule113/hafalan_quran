@@ -1,8 +1,15 @@
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:excel/excel.dart' hide Border;
+import 'package:file_picker/file_picker.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/supabase_client.dart';
 import '../../utils/search_utils.dart';
+import '../../utils/santri_import.dart';
+import '../../widgets/santri_filter_sheet.dart';
 import 'detail_santri_screen.dart'; // ← TAMBAHAN
 
 class KelolaSantriScreen extends StatefulWidget {
@@ -15,18 +22,22 @@ class KelolaSantriScreen extends StatefulWidget {
 class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
   List<Map<String, dynamic>> _santriList = [];
   bool _isLoading = true;
+  bool _isImporting = false;
+  bool _isDownloadingTemplate = false;
   String _searchQuery = '';
+  SantriFilterValues _filters = const SantriFilterValues();
 
-  List<Map<String, dynamic>> get _filteredSantriList => filterAdminRecords(
-        _santriList,
-        _searchQuery,
-        getSearchFields: (santri) => [
-          santri['nama']?.toString(),
-          santri['kelas']?.toString(),
-          santri['kamar']?.toString(),
-          santri['nama_wali']?.toString(),
-        ],
-      );
+  List<Map<String, dynamic>> get _filteredSantriList => filterSantriRecords(
+    _santriList,
+    _searchQuery,
+    filters: _filters,
+    getSearchFields: (santri) => [
+      santri['nama']?.toString(),
+      santri['kelas']?.toString(),
+      santri['kamar']?.toString(),
+      santri['nama_wali']?.toString(),
+    ],
+  );
 
   @override
   void initState() {
@@ -53,21 +64,202 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
     }
   }
 
+  Future<void> _importSantri() async {
+    if (_isImporting || _isDownloadingTemplate) return;
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+        allowMultiple: false,
+        withData: true,
+      );
+
+      if (result == null || result.files.isEmpty) return;
+
+      final bytes = result.files.single.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        throw const FormatException('File Excel tidak dapat dibaca.');
+      }
+
+      if (mounted) setState(() => _isImporting = true);
+
+      final workbook = Excel.decodeBytes(bytes);
+      final sheets = workbook.tables;
+      if (sheets.isEmpty) {
+        throw const FormatException('File Excel tidak memiliki sheet.');
+      }
+
+      final parsed = parseSantriRows(
+        sheets.values.first.rows.map((row) => row.map((cell) => cell?.value)),
+      );
+      var importResult = parsed;
+
+      if (parsed.rows.isNotEmpty) {
+        final existing = await supabase.from('santri').select('nis');
+        importResult = filterDuplicateNis(
+          parsed,
+          (existing as List).map((row) => row['nis']?.toString()),
+        );
+
+        if (importResult.rows.isNotEmpty) {
+          await supabase
+              .from('santri')
+              .insert(importResult.rows.map((row) => row.data).toList());
+        }
+      }
+
+      if (!mounted) return;
+      if (importResult.rows.isNotEmpty) await _loadSantri();
+      if (!mounted) return;
+      await _showImportSummary(importResult);
+    } on FormatException catch (e) {
+      _showImportError(e.message);
+    } on UnsupportedError catch (e) {
+      _showImportError(e.message?.toString() ?? 'Format Excel tidak didukung.');
+    } catch (e) {
+      _showImportError(
+        'Gagal import: ${e.toString().replaceAll('Exception: ', '')}',
+      );
+    } finally {
+      try {
+        await FilePicker.platform.clearTemporaryFiles();
+      } catch (_) {
+        // Tidak semua platform menyediakan file temporary.
+      }
+      if (mounted) setState(() => _isImporting = false);
+    }
+  }
+
+  Future<void> _downloadTemplate() async {
+    if (_isImporting || _isDownloadingTemplate) return;
+
+    setState(() => _isDownloadingTemplate = true);
+    try {
+      final bytes = buildSantriTemplate();
+      if (!kIsWeb) {
+        final path = await FilePicker.platform.saveFile(
+          dialogTitle: 'Simpan Template Santri',
+          fileName: 'template_santri.xlsx',
+          type: FileType.custom,
+          allowedExtensions: ['xlsx'],
+          bytes: Uint8List.fromList(bytes),
+        );
+        if (path == null) return;
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Template santri berhasil diunduh.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      _showImportError(
+        'Gagal download template: ${e.toString().replaceAll('Exception: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _isDownloadingTemplate = false);
+    }
+  }
+
+  Future<void> _showImportSummary(SantriImportResult result) async {
+    final issues = result.issues;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          'Hasil Import Excel',
+          style: GoogleFonts.dmSerifDisplay(color: AppColors.textPrimary),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Berhasil: ${result.rows.length} baris',
+              style: const TextStyle(color: AppColors.greenLight),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Dilewati: ${issues.length} baris',
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
+            if (issues.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(
+                'Detail baris yang dilewati',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 220,
+                width: double.maxFinite,
+                child: ListView.separated(
+                  itemCount: issues.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 6),
+                  itemBuilder: (_, index) {
+                    final issue = issues[index];
+                    return Text(
+                      'Baris ${issue.rowNumber}: ${issue.message}',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 12,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Tutup', style: TextStyle(color: AppColors.gold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showImportError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red.shade900,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
   Future<void> _hapusSantri(String id) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text('Hapus Santri',
-            style: GoogleFonts.dmSerifDisplay(color: AppColors.textPrimary)),
+        title: Text(
+          'Hapus Santri',
+          style: GoogleFonts.dmSerifDisplay(color: AppColors.textPrimary),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Yakin ingin menghapus santri ini?',
-                style:
-                    TextStyle(color: AppColors.textSecondary, fontSize: 13)),
+            Text(
+              'Yakin ingin menghapus santri ini?',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(12),
@@ -81,36 +273,47 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
                 children: [
                   Row(
                     children: [
-                      const Icon(Icons.warning_rounded,
-                          color: Colors.red, size: 14),
+                      const Icon(
+                        Icons.warning_rounded,
+                        color: Colors.red,
+                        size: 14,
+                      ),
                       const SizedBox(width: 6),
-                      Text('Semua data akan dihapus:',
-                          style: TextStyle(
-                              color: Colors.red.shade300,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)),
+                      Text(
+                        'Semua data akan dihapus:',
+                        style: TextStyle(
+                          color: Colors.red.shade300,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 4),
                   Text(
                     '• Semua riwayat setoran\n• Semua rekaman audio\n• Progress hafalan\n• Target hafalan\n• Akun orang tua',
                     style: TextStyle(
-                        color: AppColors.textSecondary, fontSize: 11),
+                      color: AppColors.textSecondary,
+                      fontSize: 11,
+                    ),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 8),
-            Text('Tindakan ini tidak dapat dibatalkan.',
-                style:
-                    TextStyle(color: Colors.red.shade300, fontSize: 11)),
+            Text(
+              'Tindakan ini tidak dapat dibatalkan.',
+              style: TextStyle(color: Colors.red.shade300, fontSize: 11),
+            ),
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: Text('Batal',
-                style: TextStyle(color: AppColors.textSecondary)),
+            child: Text(
+              'Batal',
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
@@ -118,7 +321,8 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
               backgroundColor: Colors.red.shade900,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
             child: const Text('Hapus Permanen'),
           ),
@@ -144,8 +348,7 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
 
       final audioPaths = (setoranList as List)
           .where((s) => s['audio_url'] != null)
-          .map((s) =>
-              (s['audio_url'] as String).split('/audio-setoran/').last)
+          .map((s) => (s['audio_url'] as String).split('/audio-setoran/').last)
           .toList();
 
       if (audioPaths.isNotEmpty) {
@@ -156,31 +359,39 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
 
       if (orangTuaId != null) {
         try {
-          await supabase
-              .rpc('delete_user', params: {'user_id': orangTuaId});
+          await supabase.rpc('delete_user', params: {'user_id': orangTuaId});
         } catch (e) {
           // Tidak perlu throw — santri sudah terhapus
         }
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Santri & semua datanya berhasil dihapus'),
-          backgroundColor: AppColors.green,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Santri & semua datanya berhasil dihapus'),
+            backgroundColor: AppColors.green,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
         _loadSantri();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              'Gagal hapus: ${e.toString().replaceAll('Exception: ', '')}'),
-          backgroundColor: Colors.red.shade900,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Gagal hapus: ${e.toString().replaceAll('Exception: ', '')}',
+            ),
+            backgroundColor: Colors.red.shade900,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
       }
     }
   }
@@ -216,32 +427,84 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
                           color: Colors.white.withOpacity(0.06),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                              color: Colors.white.withOpacity(0.08)),
+                            color: Colors.white.withOpacity(0.08),
+                          ),
                         ),
-                        child: const Icon(Icons.arrow_back_ios_new_rounded,
-                            color: AppColors.textPrimary, size: 16),
+                        child: const Icon(
+                          Icons.arrow_back_ios_new_rounded,
+                          color: AppColors.textPrimary,
+                          size: 16,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
                     Expanded(
-                      child: Text('Kelola Santri',
-                          style: GoogleFonts.dmSerifDisplay(
-                              fontSize: 24, color: AppColors.textPrimary)),
+                      child: Text(
+                        'Kelola Santri',
+                        style: GoogleFonts.dmSerifDisplay(
+                          fontSize: 24,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Download template Excel',
+                      onPressed: _isImporting || _isDownloadingTemplate
+                          ? null
+                          : _downloadTemplate,
+                      icon: _isDownloadingTemplate
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.gold,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.download_rounded,
+                              color: AppColors.gold,
+                            ),
+                    ),
+                    IconButton(
+                      tooltip: 'Import data Excel',
+                      onPressed: _isImporting || _isDownloadingTemplate
+                          ? null
+                          : _importSantri,
+                      icon: _isImporting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.gold,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.upload_file_rounded,
+                              color: AppColors.gold,
+                            ),
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
                       decoration: BoxDecoration(
                         color: AppColors.green.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                            color: AppColors.green.withOpacity(0.3)),
+                          color: AppColors.green.withOpacity(0.3),
+                        ),
                       ),
-                      child: Text('${_santriList.length} santri',
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: AppColors.greenLight,
-                              fontWeight: FontWeight.w600)),
+                      child: Text(
+                        '${_santriList.length} santri',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppColors.greenLight,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -252,214 +515,274 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
               if (!_isLoading && _santriList.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
-                  child: TextField(
-                    style: const TextStyle(color: AppColors.textPrimary),
-                    onChanged: (query) =>
-                        setState(() => _searchQuery = query),
-                    decoration: const InputDecoration(
-                      hintText: 'Cari santri...',
-                      hintStyle: TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 13,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          style: const TextStyle(color: AppColors.textPrimary),
+                          onChanged: (query) =>
+                              setState(() => _searchQuery = query),
+                          decoration: const InputDecoration(
+                            hintText: 'Cari santri...',
+                            hintStyle: TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 13,
+                            ),
+                            prefixIcon: Icon(
+                              Icons.search_rounded,
+                              color: AppColors.textSecondary,
+                              size: 20,
+                            ),
+                          ),
+                        ),
                       ),
-                      prefixIcon: Icon(
-                        Icons.search_rounded,
-                        color: AppColors.textSecondary,
-                        size: 20,
+                      const SizedBox(width: 8),
+                      SantriFilterButton(
+                        santriList: _santriList,
+                        filters: _filters,
+                        onChanged: (filters) =>
+                            setState(() => _filters = filters),
                       ),
-                    ),
+                    ],
                   ),
                 ),
 
               Expanded(
                 child: _isLoading
                     ? const Center(
-                        child:
-                            CircularProgressIndicator(color: AppColors.gold))
+                        child: CircularProgressIndicator(color: AppColors.gold),
+                      )
                     : _santriList.isEmpty
-                        ? Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.school_outlined,
-                                    size: 48, color: AppColors.textMuted),
-                                const SizedBox(height: 12),
-                                Text('Belum ada data santri',
-                                    style: TextStyle(
-                                        color: AppColors.textSecondary)),
-                              ],
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.school_outlined,
+                              size: 48,
+                              color: AppColors.textMuted,
                             ),
-                          )
-                        : filteredSantriList.isEmpty
-                            ? Center(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(Icons.search_off_rounded,
-                                        size: 48, color: AppColors.textMuted),
-                                    const SizedBox(height: 12),
-                                    Text('Santri tidak ditemukan',
-                                        style: TextStyle(
-                                            color: AppColors.textSecondary)),
-                                  ],
+                            const SizedBox(height: 12),
+                            Text(
+                              'Belum ada data santri',
+                              style: TextStyle(color: AppColors.textSecondary),
+                            ),
+                          ],
+                        ),
+                      )
+                    : filteredSantriList.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.search_off_rounded,
+                              size: 48,
+                              color: AppColors.textMuted,
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Santri tidak ditemukan',
+                              style: TextStyle(color: AppColors.textSecondary),
+                            ),
+                          ],
+                        ),
+                      )
+                    : RefreshIndicator(
+                        color: AppColors.gold,
+                        backgroundColor: AppColors.bgCard,
+                        onRefresh: _loadSantri,
+                        child: ListView.separated(
+                          padding: const EdgeInsets.fromLTRB(24, 0, 24, 100),
+                          itemCount: filteredSantriList.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final s = filteredSantriList[index];
+                            final nis = s['nis']?.toString().trim();
+                            final displayNis = nis?.isNotEmpty == true
+                                ? nis
+                                : '-';
+                            // ↓ DIMODIFIKASI: bungkus dengan GestureDetector
+                            return GestureDetector(
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      DetailSantriScreen(santriId: s['id']),
                                 ),
-                              )
-                        : RefreshIndicator(
-                            color: AppColors.gold,
-                            backgroundColor: AppColors.bgCard,
-                            onRefresh: _loadSantri,
-                            child: ListView.separated(
-                              padding:
-                                  const EdgeInsets.fromLTRB(24, 0, 24, 100),
-                              itemCount: filteredSantriList.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 10),
-                              itemBuilder: (context, index) {
-                                final s = filteredSantriList[index];
-                                // ↓ DIMODIFIKASI: bungkus dengan GestureDetector
-                                return GestureDetector(
-                                  onTap: () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => DetailSantriScreen(
-                                          santriId: s['id']),
-                                    ),
-                                  ).then((_) => _loadSantri()),
-                                  child: Container(
-                                    padding: const EdgeInsets.all(16),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white.withOpacity(0.03),
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                          color:
-                                              Colors.white.withOpacity(0.07)),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        Container(
-                                          width: 44,
-                                          height: 44,
-                                          decoration: BoxDecoration(
-                                            color: AppColors.green
-                                                .withOpacity(0.2),
-                                            borderRadius:
-                                                BorderRadius.circular(14),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              s['nama'][0].toUpperCase(),
-                                              style: GoogleFonts.dmSerifDisplay(
-                                                  fontSize: 18,
-                                                  color:
-                                                      AppColors.greenLight),
-                                            ),
+                              ).then((_) => _loadSantri()),
+                              child: Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.03),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.07),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 44,
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                        color: AppColors.green.withOpacity(0.2),
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Center(
+                                        child: Text(
+                                          s['nama'][0].toUpperCase(),
+                                          style: GoogleFonts.dmSerifDisplay(
+                                            fontSize: 18,
+                                            color: AppColors.greenLight,
                                           ),
                                         ),
-                                        const SizedBox(width: 14),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 14),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
                                             children: [
-                                              Text(
-                                                s['nama'],
-                                                style: const TextStyle(
+                                              Expanded(
+                                                child: Text(
+                                                  s['nama'].toString(),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
                                                     color:
                                                         AppColors.textPrimary,
-                                                    fontWeight:
-                                                        FontWeight.w600,
-                                                    fontSize: 14),
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Row(
-                                                children: [
-                                                  if (s['kelas'] != null)
-                                                    _MetaBadge(
-                                                        label: s['kelas'],
-                                                        color:
-                                                            AppColors.green),
-                                                  if (s['kelas'] != null)
-                                                    const SizedBox(width: 6),
-                                                  if (s['kamar'] != null)
-                                                    _MetaBadge(
-                                                        label: s['kamar'],
-                                                        color: AppColors.gold),
-                                                ],
-                                              ),
-                                              if (s['nama_wali'] != null)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                          top: 4),
-                                                  child: Text(
-                                                    'Wali: ${s['nama_wali']}',
-                                                    style: TextStyle(
-                                                        fontSize: 11,
-                                                        color: AppColors
-                                                            .textSecondary),
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 14,
                                                   ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Flexible(
+                                                child: Text(
+                                                  'NIS: $displayNis',
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    color: AppColors.gold,
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            children: [
+                                              if (s['kelas'] != null)
+                                                _MetaBadge(
+                                                  label: s['kelas'],
+                                                  color: AppColors.green,
+                                                ),
+                                              if (s['kelas'] != null)
+                                                const SizedBox(width: 6),
+                                              if (s['kamar'] != null)
+                                                _MetaBadge(
+                                                  label: s['kamar'],
+                                                  color: AppColors.gold,
                                                 ),
                                             ],
                                           ),
-                                        ),
-                                        PopupMenuButton(
-                                          icon: Icon(Icons.more_vert_rounded,
-                                              color: AppColors.textSecondary,
-                                              size: 20),
-                                          color: AppColors.bgCard,
-                                          shape: RoundedRectangleBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(14)),
-                                          itemBuilder: (_) => [
-                                            PopupMenuItem(
-                                              value: 'edit',
-                                              child: Row(children: [
-                                                Icon(Icons.edit_outlined,
-                                                    size: 16,
-                                                    color: AppColors
-                                                        .textSecondary),
-                                                const SizedBox(width: 8),
-                                                Text('Edit',
-                                                    style: TextStyle(
-                                                        color: AppColors
-                                                            .textPrimary)),
-                                              ]),
-                                            ),
-                                            PopupMenuItem(
-                                              value: 'hapus',
-                                              child: Row(children: const [
-                                                Icon(Icons.delete_outline,
-                                                    size: 16,
-                                                    color: Colors.red),
-                                                SizedBox(width: 8),
-                                                Text('Hapus',
-                                                    style: TextStyle(
-                                                        color: Colors.red)),
-                                              ]),
-                                            ),
-                                          ],
-                                          onSelected: (val) {
-                                            if (val == 'edit') {
-                                              Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (_) =>
-                                                      FormSantriScreen(
-                                                          santri: s),
+                                          if (s['nama_wali'] != null)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 4,
+                                              ),
+                                              child: Text(
+                                                'Wali: ${s['nama_wali']}',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color:
+                                                      AppColors.textSecondary,
                                                 ),
-                                              ).then((_) => _loadSantri());
-                                            } else {
-                                              _hapusSantri(s['id']);
-                                            }
-                                          },
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                    PopupMenuButton(
+                                      icon: Icon(
+                                        Icons.more_vert_rounded,
+                                        color: AppColors.textSecondary,
+                                        size: 20,
+                                      ),
+                                      color: AppColors.bgCard,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      itemBuilder: (_) => [
+                                        PopupMenuItem(
+                                          value: 'edit',
+                                          child: Row(
+                                            children: [
+                                              Icon(
+                                                Icons.edit_outlined,
+                                                size: 16,
+                                                color: AppColors.textSecondary,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Text(
+                                                'Edit',
+                                                style: TextStyle(
+                                                  color: AppColors.textPrimary,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        PopupMenuItem(
+                                          value: 'hapus',
+                                          child: Row(
+                                            children: const [
+                                              Icon(
+                                                Icons.delete_outline,
+                                                size: 16,
+                                                color: Colors.red,
+                                              ),
+                                              SizedBox(width: 8),
+                                              Text(
+                                                'Hapus',
+                                                style: TextStyle(
+                                                  color: Colors.red,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
                                       ],
+                                      onSelected: (val) {
+                                        if (val == 'edit') {
+                                          Navigator.push(
+                                            context,
+                                            MaterialPageRoute(
+                                              builder: (_) =>
+                                                  FormSantriScreen(santri: s),
+                                            ),
+                                          ).then((_) => _loadSantri());
+                                        } else {
+                                          _hapusSantri(s['id']);
+                                        }
+                                      },
                                     ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
               ),
             ],
           ),
@@ -467,15 +790,19 @@ class _KelolaSantriScreenState extends State<KelolaSantriScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
-          await Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const FormSantriScreen()));
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const FormSantriScreen()),
+          );
           _loadSantri();
         },
         backgroundColor: AppColors.gold,
         foregroundColor: AppColors.bg,
         icon: const Icon(Icons.add_rounded),
-        label: Text('Tambah Santri',
-            style: GoogleFonts.dmSans(fontWeight: FontWeight.w600)),
+        label: Text(
+          'Tambah Santri',
+          style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
+        ),
       ),
     );
   }
@@ -494,9 +821,14 @@ class _MetaBadge extends StatelessWidget {
         color: color.withOpacity(0.15),
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Text(label,
-          style: TextStyle(
-              fontSize: 10, color: color, fontWeight: FontWeight.w500)),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 10,
+          color: color,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
     );
   }
 }
@@ -555,8 +887,10 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text('Putuskan Orang Tua',
-            style: GoogleFonts.dmSerifDisplay(color: AppColors.textPrimary)),
+        title: Text(
+          'Putuskan Orang Tua',
+          style: GoogleFonts.dmSerifDisplay(color: AppColors.textPrimary),
+        ),
         content: Text(
           'Yakin ingin memutuskan hubungan orang tua dari santri ini? Akun orang tua tidak akan dihapus.',
           style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
@@ -564,8 +898,10 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: Text('Batal',
-                style: TextStyle(color: AppColors.textSecondary)),
+            child: Text(
+              'Batal',
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
@@ -573,7 +909,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
               backgroundColor: Colors.red.shade900,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
             child: const Text('Putuskan'),
           ),
@@ -583,14 +920,16 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
 
     if (confirm == true) {
       setState(() => _selectedOrangTuaId = null);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content:
-            const Text('Hubungan orang tua akan diputus saat simpan'),
-        backgroundColor: AppColors.green,
-        behavior: SnackBarBehavior.floating,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Hubungan orang tua akan diputus saat simpan'),
+          backgroundColor: AppColors.green,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
     }
   }
 
@@ -615,11 +954,14 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
       builder: (_) => StatefulBuilder(
         builder: (ctx, setModalState) => Container(
           padding: EdgeInsets.fromLTRB(
-              24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 32),
+            24,
+            24,
+            24,
+            MediaQuery.of(context).viewInsets.bottom + 32,
+          ),
           decoration: BoxDecoration(
             color: const Color(0xFF122A1E),
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(24)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
             border: Border.all(color: Colors.white.withOpacity(0.08)),
           ),
           child: Column(
@@ -646,19 +988,30 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                       color: AppColors.purple.withOpacity(0.2),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Icon(Icons.edit_outlined,
-                        color: Colors.purpleAccent, size: 18),
+                    child: const Icon(
+                      Icons.edit_outlined,
+                      color: Colors.purpleAccent,
+                      size: 18,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Edit Orang Tua',
-                          style: GoogleFonts.dmSerifDisplay(
-                              fontSize: 20, color: AppColors.textPrimary)),
-                      Text(ortu['nama'] ?? '',
-                          style: TextStyle(
-                              fontSize: 11, color: AppColors.textSecondary)),
+                      Text(
+                        'Edit Orang Tua',
+                        style: GoogleFonts.dmSerifDisplay(
+                          fontSize: 20,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                      Text(
+                        ortu['nama'] ?? '',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
                     ],
                   ),
                 ],
@@ -669,8 +1022,11 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                 style: const TextStyle(color: AppColors.textPrimary),
                 decoration: const InputDecoration(
                   labelText: 'Nama Lengkap',
-                  prefixIcon: Icon(Icons.person_outlined,
-                      color: AppColors.textSecondary, size: 20),
+                  prefixIcon: Icon(
+                    Icons.person_outlined,
+                    color: AppColors.textSecondary,
+                    size: 20,
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -680,8 +1036,11 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                 style: const TextStyle(color: AppColors.textPrimary),
                 decoration: const InputDecoration(
                   labelText: 'No. HP',
-                  prefixIcon: Icon(Icons.phone_outlined,
-                      color: AppColors.textSecondary, size: 20),
+                  prefixIcon: Icon(
+                    Icons.phone_outlined,
+                    color: AppColors.textSecondary,
+                    size: 20,
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
@@ -704,16 +1063,18 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             await _loadOrangTua();
                             if (context.mounted) {
                               Navigator.pop(ctx);
-                              ScaffoldMessenger.of(context)
-                                  .showSnackBar(SnackBar(
-                                content: const Text(
-                                    'Data orang tua diperbarui'),
-                                backgroundColor: AppColors.green,
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(12)),
-                              ));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text(
+                                    'Data orang tua diperbarui',
+                                  ),
+                                  backgroundColor: AppColors.green,
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              );
                             }
                           } catch (e) {
                             setModalState(() => saving = false);
@@ -723,7 +1084,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                     backgroundColor: AppColors.gold,
                     foregroundColor: AppColors.bg,
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                     elevation: 0,
                   ),
                   child: saving
@@ -731,10 +1093,17 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                           width: 20,
                           height: 20,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: AppColors.bg))
-                      : Text('Simpan Perubahan',
+                            strokeWidth: 2,
+                            color: AppColors.bg,
+                          ),
+                        )
+                      : Text(
+                          'Simpan Perubahan',
                           style: GoogleFonts.dmSans(
-                              fontSize: 15, fontWeight: FontWeight.w600)),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                 ),
               ),
               const SizedBox(height: 10),
@@ -753,75 +1122,85 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                               builder: (dCtx, setDialog) => AlertDialog(
                                 backgroundColor: AppColors.bgCard,
                                 shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(20)),
-                                title: Text('Reset Sandi',
-                                    style: GoogleFonts.dmSerifDisplay(
-                                        color: AppColors.textPrimary)),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                title: Text(
+                                  'Reset Sandi',
+                                  style: GoogleFonts.dmSerifDisplay(
+                                    color: AppColors.textPrimary,
+                                  ),
+                                ),
                                 content: Column(
                                   mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                        'Buat sandi baru untuk ${ortu['nama']}',
-                                        style: TextStyle(
-                                            color: AppColors.textSecondary,
-                                            fontSize: 13)),
+                                      'Buat sandi baru untuk ${ortu['nama']}',
+                                      style: TextStyle(
+                                        color: AppColors.textSecondary,
+                                        fontSize: 13,
+                                      ),
+                                    ),
                                     const SizedBox(height: 14),
                                     TextField(
                                       controller: newPassCtrl,
                                       obscureText: obscureNewPass,
                                       style: const TextStyle(
-                                          color: AppColors.textPrimary),
+                                        color: AppColors.textPrimary,
+                                      ),
                                       decoration: InputDecoration(
                                         labelText: 'Sandi Baru',
                                         prefixIcon: const Icon(
-                                            Icons.lock_outline_rounded,
-                                            color: AppColors.textSecondary,
-                                            size: 20),
+                                          Icons.lock_outline_rounded,
+                                          color: AppColors.textSecondary,
+                                          size: 20,
+                                        ),
                                         suffixIcon: IconButton(
                                           icon: Icon(
                                             obscureNewPass
-                                                ? Icons
-                                                    .visibility_off_outlined
+                                                ? Icons.visibility_off_outlined
                                                 : Icons.visibility_outlined,
                                             color: AppColors.textSecondary,
                                             size: 18,
                                           ),
-                                          onPressed: () => setDialog(() =>
-                                              obscureNewPass =
-                                                  !obscureNewPass),
+                                          onPressed: () => setDialog(
+                                            () => obscureNewPass =
+                                                !obscureNewPass,
+                                          ),
                                         ),
                                       ),
                                     ),
                                     const SizedBox(height: 6),
-                                    Text('Minimal 6 karakter',
-                                        style: TextStyle(
-                                            fontSize: 11,
-                                            color: AppColors.textMuted)),
+                                    Text(
+                                      'Minimal 6 karakter',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: AppColors.textMuted,
+                                      ),
+                                    ),
                                   ],
                                 ),
                                 actions: [
                                   TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(dCtx, false),
-                                    child: Text('Batal',
-                                        style: TextStyle(
-                                            color:
-                                                AppColors.textSecondary)),
+                                    onPressed: () => Navigator.pop(dCtx, false),
+                                    child: Text(
+                                      'Batal',
+                                      style: TextStyle(
+                                        color: AppColors.textSecondary,
+                                      ),
+                                    ),
                                   ),
                                   ElevatedButton(
                                     onPressed: () {
-                                      if (newPassCtrl.text.length < 6)
-                                        return;
+                                      if (newPassCtrl.text.length < 6) return;
                                       Navigator.pop(dCtx, true);
                                     },
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: AppColors.gold,
                                       foregroundColor: AppColors.bg,
                                       shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(10)),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
                                     ),
                                     child: const Text('Reset'),
                                   ),
@@ -843,52 +1222,57 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                               },
                             );
                             if (res.status != 200) {
-                              throw Exception(res.data['error'] ??
-                                  'Gagal reset sandi');
+                              throw Exception(
+                                res.data['error'] ?? 'Gagal reset sandi',
+                              );
                             }
                             if (context.mounted) {
                               Navigator.pop(ctx);
-                              ScaffoldMessenger.of(context)
-                                  .showSnackBar(SnackBar(
-                                content: Text(
-                                    'Sandi ${ortu['nama']} berhasil direset'),
-                                backgroundColor: AppColors.green,
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(12)),
-                              ));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Sandi ${ortu['nama']} berhasil direset',
+                                  ),
+                                  backgroundColor: AppColors.green,
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              );
                             }
                           } catch (e) {
                             setModalState(() => saving = false);
                             if (context.mounted) {
-                              ScaffoldMessenger.of(context)
-                                  .showSnackBar(SnackBar(
-                                content: Text('Gagal: $e'),
-                                backgroundColor: Colors.red.shade900,
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(12)),
-                              ));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Gagal: $e'),
+                                  backgroundColor: Colors.red.shade900,
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              );
                             }
                           }
                         },
                   style: OutlinedButton.styleFrom(
                     foregroundColor: AppColors.gold,
-                    side:
-                        BorderSide(color: AppColors.gold.withOpacity(0.4)),
+                    side: BorderSide(color: AppColors.gold.withOpacity(0.4)),
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                   ),
                   child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(Icons.lock_reset_rounded, size: 18),
                       SizedBox(width: 8),
-                      Text('Reset Sandi',
-                          style:
-                              TextStyle(fontWeight: FontWeight.w600)),
+                      Text(
+                        'Reset Sandi',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                     ],
                   ),
                 ),
@@ -907,10 +1291,14 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             builder: (_) => AlertDialog(
                               backgroundColor: AppColors.bgCard,
                               shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(20)),
-                              title: Text('Hapus Akun Orang Tua',
-                                  style: GoogleFonts.dmSerifDisplay(
-                                      color: AppColors.textPrimary)),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              title: Text(
+                                'Hapus Akun Orang Tua',
+                                style: GoogleFonts.dmSerifDisplay(
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
                               content: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -918,24 +1306,26 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                     padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
                                       color: Colors.red.withOpacity(0.08),
-                                      borderRadius:
-                                          BorderRadius.circular(10),
+                                      borderRadius: BorderRadius.circular(10),
                                       border: Border.all(
-                                          color:
-                                              Colors.red.withOpacity(0.2)),
+                                        color: Colors.red.withOpacity(0.2),
+                                      ),
                                     ),
                                     child: Row(
                                       children: [
-                                        const Icon(Icons.warning_rounded,
-                                            color: Colors.red, size: 16),
+                                        const Icon(
+                                          Icons.warning_rounded,
+                                          color: Colors.red,
+                                          size: 16,
+                                        ),
                                         const SizedBox(width: 8),
                                         Expanded(
                                           child: Text(
                                             'Akun ${ortu['nama']} akan dihapus permanen. Santri akan terputus dari orang tua ini.',
                                             style: TextStyle(
-                                                fontSize: 12,
-                                                color: AppColors
-                                                    .textSecondary),
+                                              fontSize: 12,
+                                              color: AppColors.textSecondary,
+                                            ),
                                           ),
                                         ),
                                       ],
@@ -943,30 +1333,32 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                   ),
                                   const SizedBox(height: 8),
                                   Text(
-                                      'Tindakan ini tidak dapat dibatalkan.',
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.red.shade300)),
+                                    'Tindakan ini tidak dapat dibatalkan.',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.red.shade300,
+                                    ),
+                                  ),
                                 ],
                               ),
                               actions: [
                                 TextButton(
-                                  onPressed: () =>
-                                      Navigator.pop(ctx, false),
-                                  child: Text('Batal',
-                                      style: TextStyle(
-                                          color:
-                                              AppColors.textSecondary)),
+                                  onPressed: () => Navigator.pop(ctx, false),
+                                  child: Text(
+                                    'Batal',
+                                    style: TextStyle(
+                                      color: AppColors.textSecondary,
+                                    ),
+                                  ),
                                 ),
                                 ElevatedButton(
-                                  onPressed: () =>
-                                      Navigator.pop(ctx, true),
+                                  onPressed: () => Navigator.pop(ctx, true),
                                   style: ElevatedButton.styleFrom(
                                     backgroundColor: Colors.red.shade900,
                                     foregroundColor: Colors.white,
                                     shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(10)),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
                                   ),
                                   child: const Text('Hapus Permanen'),
                                 ),
@@ -980,37 +1372,42 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                           try {
                             await supabase
                                 .from('santri')
-                                .update({'orang_tua_id': null}).eq(
-                                    'orang_tua_id', _selectedOrangTuaId!);
-                            await supabase.rpc('delete_user',
-                                params: {'user_id': _selectedOrangTuaId});
+                                .update({'orang_tua_id': null})
+                                .eq('orang_tua_id', _selectedOrangTuaId!);
+                            await supabase.rpc(
+                              'delete_user',
+                              params: {'user_id': _selectedOrangTuaId},
+                            );
                             if (context.mounted) {
                               setState(() => _selectedOrangTuaId = null);
                               await _loadOrangTua();
                               Navigator.pop(ctx);
-                              ScaffoldMessenger.of(context)
-                                  .showSnackBar(SnackBar(
-                                content: const Text(
-                                    'Akun orang tua berhasil dihapus'),
-                                backgroundColor: AppColors.green,
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(12)),
-                              ));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: const Text(
+                                    'Akun orang tua berhasil dihapus',
+                                  ),
+                                  backgroundColor: AppColors.green,
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              );
                             }
                           } catch (e) {
                             setModalState(() => saving = false);
                             if (context.mounted) {
-                              ScaffoldMessenger.of(context)
-                                  .showSnackBar(SnackBar(
-                                content: Text('Gagal hapus: $e'),
-                                backgroundColor: Colors.red.shade900,
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius:
-                                        BorderRadius.circular(12)),
-                              ));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Gagal hapus: $e'),
+                                  backgroundColor: Colors.red.shade900,
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              );
                             }
                           }
                         },
@@ -1018,16 +1415,18 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                     foregroundColor: Colors.red,
                     side: BorderSide(color: Colors.red.withOpacity(0.4)),
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: const [
                       Icon(Icons.delete_outline_rounded, size: 18),
                       SizedBox(width: 8),
-                      Text('Hapus Akun Orang Tua',
-                          style:
-                              TextStyle(fontWeight: FontWeight.w600)),
+                      Text(
+                        'Hapus Akun Orang Tua',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                     ],
                   ),
                 ),
@@ -1091,7 +1490,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
         );
         if (response.status != 200) {
           throw Exception(
-              response.data['error'] ?? 'Gagal buat akun orang tua');
+            response.data['error'] ?? 'Gagal buat akun orang tua',
+          );
         }
         orangTuaId = response.data['id'] as String?;
       }
@@ -1133,13 +1533,14 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
   }
 
   void _showSnack(String msg, {bool isSuccess = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: isSuccess ? AppColors.green : Colors.red.shade900,
-      behavior: SnackBarBehavior.floating,
-      shape:
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: isSuccess ? AppColors.green : Colors.red.shade900,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
   }
 
   @override
@@ -1206,17 +1607,23 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                           color: Colors.white.withOpacity(0.06),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                              color: Colors.white.withOpacity(0.08)),
+                            color: Colors.white.withOpacity(0.08),
+                          ),
                         ),
-                        child: const Icon(Icons.arrow_back_ios_new_rounded,
-                            color: AppColors.textPrimary, size: 16),
+                        child: const Icon(
+                          Icons.arrow_back_ios_new_rounded,
+                          color: AppColors.textPrimary,
+                          size: 16,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
                     Text(
                       _isEdit ? 'Edit Santri' : 'Tambah Santri',
                       style: GoogleFonts.dmSerifDisplay(
-                          fontSize: 24, color: AppColors.textPrimary),
+                        fontSize: 24,
+                        color: AppColors.textPrimary,
+                      ),
                     ),
                   ],
                 ),
@@ -1230,25 +1637,33 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                     children: [
                       _SectionLabel(label: 'DATA SANTRI'),
                       const SizedBox(height: 14),
-                      _field('Nama Lengkap', _namaController,
-                          icon: Icons.person_outlined),
+                      _field(
+                        'Nama Lengkap',
+                        _namaController,
+                        icon: Icons.person_outlined,
+                      ),
                       const SizedBox(height: 12),
-                      _field('NIS', _nisController,
-                          icon: Icons.badge_outlined),
+                      _field('NIS', _nisController, icon: Icons.badge_outlined),
                       const SizedBox(height: 12),
-                      _field('Kelas', _kelasController,
-                          icon: Icons.class_outlined),
+                      _field(
+                        'Kelas',
+                        _kelasController,
+                        icon: Icons.class_outlined,
+                      ),
                       const SizedBox(height: 12),
-                      _field('Kamar', _kamarController,
-                          icon: Icons.door_back_door_outlined),
+                      _field(
+                        'Kamar',
+                        _kamarController,
+                        icon: Icons.door_back_door_outlined,
+                      ),
                       const SizedBox(height: 12),
                       Container(
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 16),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.05),
                           border: Border.all(
-                              color: Colors.white.withOpacity(0.08)),
+                            color: Colors.white.withOpacity(0.08),
+                          ),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: DropdownButtonHideUnderline(
@@ -1256,12 +1671,17 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             value: _jenisKelamin,
                             dropdownColor: AppColors.bgCard,
                             style: const TextStyle(
-                                color: AppColors.textPrimary),
+                              color: AppColors.textPrimary,
+                            ),
                             items: const [
                               DropdownMenuItem(
-                                  value: 'L', child: Text('Laki-laki')),
+                                value: 'L',
+                                child: Text('Laki-laki'),
+                              ),
                               DropdownMenuItem(
-                                  value: 'P', child: Text('Perempuan')),
+                                value: 'P',
+                                child: Text('Perempuan'),
+                              ),
                             ],
                             onChanged: (v) =>
                                 setState(() => _jenisKelamin = v!),
@@ -1271,12 +1691,18 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                       const SizedBox(height: 20),
                       _SectionLabel(label: 'DATA WALI'),
                       const SizedBox(height: 14),
-                      _field('Nama Wali', _namaWaliController,
-                          icon: Icons.family_restroom_outlined),
+                      _field(
+                        'Nama Wali',
+                        _namaWaliController,
+                        icon: Icons.family_restroom_outlined,
+                      ),
                       const SizedBox(height: 12),
-                      _field('No. HP Wali', _noHpWaliController,
-                          type: TextInputType.phone,
-                          icon: Icons.phone_outlined),
+                      _field(
+                        'No. HP Wali',
+                        _noHpWaliController,
+                        type: TextInputType.phone,
+                        icon: Icons.phone_outlined,
+                      ),
                       const SizedBox(height: 20),
                       _SectionLabel(label: 'AKUN ORANG TUA'),
                       const SizedBox(height: 14),
@@ -1287,7 +1713,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             color: AppColors.green.withOpacity(0.08),
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
-                                color: AppColors.green.withOpacity(0.2)),
+                              color: AppColors.green.withOpacity(0.2),
+                            ),
                           ),
                           child: Row(
                             children: [
@@ -1299,33 +1726,34 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: const Icon(
-                                    Icons.family_restroom_rounded,
-                                    color: AppColors.greenLight,
-                                    size: 18),
+                                  Icons.family_restroom_rounded,
+                                  color: AppColors.greenLight,
+                                  size: 18,
+                                ),
                               ),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
                                       _orangTuaList.firstWhere(
-                                        (o) =>
-                                            o['id'] == _selectedOrangTuaId,
-                                        orElse: () =>
-                                            {'nama': 'Orang Tua'},
+                                        (o) => o['id'] == _selectedOrangTuaId,
+                                        orElse: () => {'nama': 'Orang Tua'},
                                       )['nama'],
                                       style: const TextStyle(
-                                          color: AppColors.textPrimary,
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 14),
+                                        color: AppColors.textPrimary,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
                                     ),
-                                    Text('Terhubung ke santri ini',
-                                        style: TextStyle(
-                                            fontSize: 11,
-                                            color:
-                                                AppColors.textSecondary)),
+                                    Text(
+                                      'Terhubung ke santri ini',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: AppColors.textSecondary,
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ),
@@ -1333,20 +1761,24 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                 onTap: () => _showEditOrangTuaSheet(),
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 6),
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
                                   decoration: BoxDecoration(
-                                    color:
-                                        AppColors.blue.withOpacity(0.15),
+                                    color: AppColors.blue.withOpacity(0.15),
                                     borderRadius: BorderRadius.circular(8),
                                     border: Border.all(
-                                        color: AppColors.blue
-                                            .withOpacity(0.3)),
+                                      color: AppColors.blue.withOpacity(0.3),
+                                    ),
                                   ),
-                                  child: const Text('Edit',
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.lightBlue,
-                                          fontWeight: FontWeight.w600)),
+                                  child: const Text(
+                                    'Edit',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.lightBlue,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -1360,9 +1792,10 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: const Icon(
-                                      Icons.link_off_rounded,
-                                      color: Colors.red,
-                                      size: 16),
+                                    Icons.link_off_rounded,
+                                    color: Colors.red,
+                                    size: 16,
+                                  ),
                                 ),
                               ),
                             ],
@@ -1370,10 +1803,13 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                         ),
                         const SizedBox(height: 10),
                         Center(
-                          child: Text('— atau ganti dengan —',
-                              style: TextStyle(
-                                  color: AppColors.textMuted,
-                                  fontSize: 11)),
+                          child: Text(
+                            '— atau ganti dengan —',
+                            style: TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 11,
+                            ),
+                          ),
                         ),
                         const SizedBox(height: 10),
                       ],
@@ -1385,33 +1821,38 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                   color: Colors.orange.withOpacity(0.08),
                                   borderRadius: BorderRadius.circular(14),
                                   border: Border.all(
-                                      color:
-                                          Colors.orange.withOpacity(0.2)),
+                                    color: Colors.orange.withOpacity(0.2),
+                                  ),
                                 ),
                                 child: Row(
                                   children: [
-                                    const Icon(Icons.info_outline,
-                                        color: Colors.orange, size: 16),
+                                    const Icon(
+                                      Icons.info_outline,
+                                      color: Colors.orange,
+                                      size: 16,
+                                    ),
                                     const SizedBox(width: 10),
                                     Expanded(
                                       child: Text(
-                                          'Belum ada akun orang tua tersedia.',
-                                          style: TextStyle(
-                                              fontSize: 11,
-                                              color:
-                                                  AppColors.textSecondary)),
+                                        'Belum ada akun orang tua tersedia.',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: AppColors.textSecondary,
+                                        ),
+                                      ),
                                     ),
                                   ],
                                 ),
                               )
                             : Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 16),
+                                  horizontal: 16,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.white.withOpacity(0.05),
                                   border: Border.all(
-                                      color:
-                                          Colors.white.withOpacity(0.08)),
+                                    color: Colors.white.withOpacity(0.08),
+                                  ),
                                   borderRadius: BorderRadius.circular(14),
                                 ),
                                 child: DropdownButtonHideUnderline(
@@ -1419,30 +1860,37 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                     value: _selectedOrangTuaId,
                                     dropdownColor: AppColors.bgCard,
                                     isExpanded: true,
-                                    hint: Text('Pilih akun orang tua',
-                                        style: TextStyle(
-                                            color: AppColors.textSecondary,
-                                            fontSize: 14)),
+                                    hint: Text(
+                                      'Pilih akun orang tua',
+                                      style: TextStyle(
+                                        color: AppColors.textSecondary,
+                                        fontSize: 14,
+                                      ),
+                                    ),
                                     items: [
                                       DropdownMenuItem(
                                         value: null,
-                                        child: Text('Tidak dihubungkan',
-                                            style: TextStyle(
-                                                color: AppColors
-                                                    .textSecondary)),
+                                        child: Text(
+                                          'Tidak dihubungkan',
+                                          style: TextStyle(
+                                            color: AppColors.textSecondary,
+                                          ),
+                                        ),
                                       ),
                                       ..._orangTuaList.map(
                                         (o) => DropdownMenuItem(
                                           value: o['id'],
-                                          child: Text(o['nama'],
-                                              style: const TextStyle(
-                                                  color: AppColors
-                                                      .textPrimary)),
+                                          child: Text(
+                                            o['nama'],
+                                            style: const TextStyle(
+                                              color: AppColors.textPrimary,
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ],
-                                    onChanged: (v) => setState(
-                                        () => _selectedOrangTuaId = v),
+                                    onChanged: (v) =>
+                                        setState(() => _selectedOrangTuaId = v),
                                   ),
                                 ),
                               ),
@@ -1450,8 +1898,7 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                       GestureDetector(
                         onTap: () => setState(() {
                           _buatAkunOrangTua = !_buatAkunOrangTua;
-                          if (_buatAkunOrangTua)
-                            _selectedOrangTuaId = null;
+                          if (_buatAkunOrangTua) _selectedOrangTuaId = null;
                         }),
                         child: Container(
                           padding: const EdgeInsets.all(14),
@@ -1505,12 +1952,18 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                       ),
                       if (_buatAkunOrangTua) ...[
                         const SizedBox(height: 12),
-                        _field('Nama Orang Tua', _namaOrangTuaController,
-                            icon: Icons.person_outlined),
+                        _field(
+                          'Nama Orang Tua',
+                          _namaOrangTuaController,
+                          icon: Icons.person_outlined,
+                        ),
                         const SizedBox(height: 12),
-                        _field('Email', _emailOrangTuaController,
-                            type: TextInputType.emailAddress,
-                            icon: Icons.email_outlined),
+                        _field(
+                          'Email',
+                          _emailOrangTuaController,
+                          type: TextInputType.emailAddress,
+                          icon: Icons.email_outlined,
+                        ),
                         const SizedBox(height: 12),
                         _field(
                           'Password',
@@ -1525,8 +1978,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                               color: AppColors.textSecondary,
                               size: 18,
                             ),
-                            onPressed: () => setState(
-                                () => _obscurePass = !_obscurePass),
+                            onPressed: () =>
+                                setState(() => _obscurePass = !_obscurePass),
                           ),
                         ),
                         const SizedBox(height: 6),
@@ -1536,19 +1989,24 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             color: AppColors.purple.withOpacity(0.08),
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(
-                                color: AppColors.purple.withOpacity(0.2)),
+                              color: AppColors.purple.withOpacity(0.2),
+                            ),
                           ),
                           child: Row(
                             children: [
-                              const Icon(Icons.info_outline_rounded,
-                                  color: Colors.purpleAccent, size: 16),
+                              const Icon(
+                                Icons.info_outline_rounded,
+                                color: Colors.purpleAccent,
+                                size: 16,
+                              ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
                                   'Orang tua bisa login dengan email & password ini',
                                   style: TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textSecondary),
+                                    fontSize: 11,
+                                    color: AppColors.textSecondary,
+                                  ),
                                 ),
                               ),
                             ],
@@ -1564,7 +2022,8 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                             backgroundColor: AppColors.gold,
                             foregroundColor: AppColors.bg,
                             shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16)),
+                              borderRadius: BorderRadius.circular(16),
+                            ),
                             elevation: 0,
                           ),
                           child: _isLoading
@@ -1572,14 +2031,18 @@ class _FormSantriScreenState extends State<FormSantriScreen> {
                                   width: 20,
                                   height: 20,
                                   child: CircularProgressIndicator(
-                                      strokeWidth: 2, color: AppColors.bg))
+                                    strokeWidth: 2,
+                                    color: AppColors.bg,
+                                  ),
+                                )
                               : Text(
                                   _isEdit
                                       ? 'Simpan Perubahan'
                                       : 'Tambah Santri',
                                   style: GoogleFonts.dmSans(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600),
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                         ),
                       ),

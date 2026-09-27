@@ -13,6 +13,26 @@ import '../../services/notification_service.dart';
 import 'setoran_detail_screen.dart';
 
 @visibleForTesting
+Map<String, dynamic>? parentSantriById(
+  List<Map<String, dynamic>> santriList,
+  String? santriId,
+) {
+  if (santriId == null || santriId.isEmpty) return null;
+  for (final santri in santriList) {
+    if (santri['id']?.toString() == santriId) return santri;
+  }
+  return null;
+}
+
+@visibleForTesting
+Map<String, dynamic>? selectParentSantri(
+  List<Map<String, dynamic>> santriList,
+  String? selectedId,
+) =>
+    parentSantriById(santriList, selectedId) ??
+    (santriList.isEmpty ? null : santriList.first);
+
+@visibleForTesting
 List<Map<String, dynamic>> notificationsWithReadState(
   List<Map<String, dynamic>> notifications,
   Object notificationId,
@@ -22,6 +42,15 @@ List<Map<String, dynamic>> notificationsWithReadState(
     notification['id'] == notificationId
         ? {...notification, 'dibaca': isRead}
         : notification,
+];
+
+@visibleForTesting
+List<Map<String, dynamic>> notificationsWithoutId(
+  List<Map<String, dynamic>> notifications,
+  Object notificationId,
+) => [
+  for (final notification in notifications)
+    if (notification['id'] != notificationId) notification,
 ];
 
 @visibleForTesting
@@ -42,6 +71,35 @@ Map<String, dynamic>? notificationForSetoran(
     if (notificationSetoranId(notification) == setoranId) return notification;
   }
   return null;
+}
+
+@visibleForTesting
+String parentTargetStatusLabel(Object? status) {
+  switch (status?.toString()) {
+    case 'selesai':
+      return 'Selesai';
+    case 'gagal':
+      return 'Gagal';
+    default:
+      return 'Aktif';
+  }
+}
+
+@visibleForTesting
+String parentTargetDeadlineLabel(Object? rawDeadline, {DateTime? now}) {
+  final parsed = DateTime.tryParse(rawDeadline?.toString() ?? '');
+  if (parsed == null) return 'Deadline belum diatur';
+
+  final today = now ?? DateTime.now();
+  final deadline = DateTime(parsed.year, parsed.month, parsed.day);
+  final currentDay = DateTime(today.year, today.month, today.day);
+  final daysRemaining = deadline.difference(currentDay).inDays;
+
+  if (daysRemaining < 0) {
+    return 'Terlambat ${daysRemaining.abs()} hari';
+  }
+  if (daysRemaining == 0) return 'Deadline hari ini';
+  return '$daysRemaining hari lagi';
 }
 
 class NotificationSetoranTapTarget extends StatelessWidget {
@@ -118,11 +176,15 @@ class OrangTuaHomeScreen extends StatefulWidget {
 class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  List<Map<String, dynamic>> _santriList = [];
   Map<String, dynamic>? _santri;
   List<Map<String, dynamic>> _notifList = [];
   List<Map<String, dynamic>> _setoranList = [];
+  List<Map<String, dynamic>> _targetList = [];
   Map<int, String> _progressMap = {};
   bool _isLoading = true;
+  bool _targetLoading = false;
+  String? _targetError;
   String _namaOrtu = 'Orang Tua';
   int _unreadCount = 0;
 
@@ -130,6 +192,8 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   int _page = 0;
   bool _hasMore = true;
   bool _loadingMore = false;
+  String? _deletingNotificationId;
+  bool _deletingAllNotifications = false;
 
   final FlutterSoundPlayer _player = FlutterSoundPlayer();
   bool _playerReady = false;
@@ -140,7 +204,7 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     NotificationService.pendingSetoranId.addListener(_onPendingSetoranChanged);
     _initPlayer();
     _loadData();
@@ -152,6 +216,7 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   }
 
   Future<void> _loadData() async {
+    if (_deletingNotificationId != null || _deletingAllNotifications) return;
     setState(() => _isLoading = true);
     try {
       final userId = supabase.auth.currentUser!.id;
@@ -168,7 +233,12 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
           .from('santri')
           .select()
           .eq('orang_tua_id', userId)
-          .maybeSingle();
+          .order('nama');
+      final santriList = List<Map<String, dynamic>>.from(santriData);
+      final selectedSantri = selectParentSantri(
+        santriList,
+        _santri?['id']?.toString(),
+      );
 
       // Notifikasi
       final notif = await supabase
@@ -181,7 +251,16 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
       if (mounted) {
         setState(() {
           _namaOrtu = profile['nama'] ?? 'Orang Tua';
-          _santri = santriData;
+          _santriList = santriList;
+          _santri = selectedSantri;
+          _setoranList = [];
+          _targetList = [];
+          _progressMap = {};
+          _targetLoading = selectedSantri != null;
+          _targetError = null;
+          _page = 0;
+          _hasMore = true;
+          _loadingMore = false;
           _notifList = List<Map<String, dynamic>>.from(notif);
           _unreadCount = _notifList.where((n) => n['dibaca'] == false).length;
           _isLoading = false;
@@ -192,12 +271,48 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
       }
 
       // Load setoran & progress kalau ada santri
-      if (santriData != null) {
-        await _loadSetoran(santriData['id']);
-        await _loadProgress(santriData['id']);
+      final santriId = selectedSantri?['id']?.toString();
+      if (santriId != null && santriId.isNotEmpty) {
+        await _loadSetoran(santriId);
+        await _loadProgress(santriId);
+        await _loadTarget(santriId);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  bool _isCurrentSantri(String santriId) =>
+      _santri?['id']?.toString() == santriId;
+
+  Future<void> _changeSantri(String santriId) async {
+    final selectedSantri = parentSantriById(_santriList, santriId);
+    if (selectedSantri == null || _isCurrentSantri(santriId)) return;
+
+    if (_isPlaying && _playerReady) await _player.stopPlayer();
+    if (!mounted) return;
+
+    setState(() {
+      _santri = selectedSantri;
+      _setoranList = [];
+      _targetList = [];
+      _progressMap = {};
+      _targetLoading = true;
+      _targetError = null;
+      _page = 0;
+      _hasMore = true;
+      _loadingMore = false;
+      _playingId = null;
+      _isPlaying = false;
+      _isLoading = true;
+    });
+
+    await _loadSetoran(santriId);
+    await _loadProgress(santriId);
+    await _loadTarget(santriId);
+
+    if (mounted && _isCurrentSantri(santriId)) {
+      setState(() => _isLoading = false);
     }
   }
 
@@ -244,6 +359,94 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     }
   }
 
+  Future<void> _deleteNotification(Map<String, dynamic> notification) async {
+    if (_deletingNotificationId != null || _deletingAllNotifications) return;
+
+    final notificationId = notification['id'];
+    final userId = supabase.auth.currentUser?.id;
+    if (notificationId == null || userId == null) {
+      AppSnackbar.error(context, 'Notifikasi tidak dapat dihapus');
+      return;
+    }
+
+    final confirm = await KonfirmasiDialog.hapus(
+      context,
+      judul: 'Hapus notifikasi?',
+      pesan: 'Notifikasi ini akan dihapus permanen.',
+    );
+    if (!confirm || !mounted) return;
+
+    setState(() => _deletingNotificationId = notificationId.toString());
+    try {
+      final deleted = await supabase
+          .from('notifikasi')
+          .delete()
+          .eq('id', notificationId)
+          .eq('orang_tua_id', userId)
+          .select('id');
+      if (deleted.isEmpty) {
+        throw StateError('Notifikasi tidak ditemukan atau tidak dapat dihapus');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _notifList = notificationsWithoutId(_notifList, notificationId);
+        _unreadCount = _notifList.where((n) => n['dibaca'] == false).length;
+        _deletingNotificationId = null;
+      });
+      AppSnackbar.sukses(context, 'Notifikasi berhasil dihapus');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _deletingNotificationId = null);
+      AppSnackbar.error(context, 'Gagal menghapus notifikasi');
+    }
+  }
+
+  Future<void> _deleteAllNotifications() async {
+    if (_notifList.isEmpty ||
+        _deletingNotificationId != null ||
+        _deletingAllNotifications) {
+      return;
+    }
+
+    final userId = supabase.auth.currentUser?.id;
+    if (userId == null) {
+      AppSnackbar.error(context, 'Notifikasi tidak dapat dihapus');
+      return;
+    }
+
+    final confirm = await KonfirmasiDialog.hapus(
+      context,
+      judul: 'Hapus semua notifikasi?',
+      pesan: 'Semua notifikasi akan dihapus permanen.',
+    );
+    if (!confirm || !mounted) return;
+
+    setState(() => _deletingAllNotifications = true);
+    try {
+      final deleted = await supabase
+          .from('notifikasi')
+          .delete()
+          .eq('orang_tua_id', userId)
+          .select('id');
+      if (deleted.isEmpty) {
+        throw StateError('Notifikasi tidak ditemukan atau tidak dapat dihapus');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _notifList = [];
+        _unreadCount = 0;
+        _deletingAllNotifications = false;
+      });
+      AppSnackbar.sukses(context, 'Semua notifikasi berhasil dihapus');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _deletingAllNotifications = false);
+      AppSnackbar.error(context, 'Gagal menghapus semua notifikasi');
+    }
+  }
+
   void _onPendingSetoranChanged() {
     if (!mounted ||
         _isLoading ||
@@ -257,19 +460,25 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
 
   Future<void> _handlePendingSetoran(String setoranId) async {
     final notification = notificationForSetoran(_notifList, setoranId);
-    if (notification != null) await _markNotificationAsRead(notification);
+    if (notification != null) {
+      await _openNotification(notification, setoranId);
+      return;
+    }
 
     if (!mounted) return;
-    if (_santri == null) {
+    if (_santri == null || _santriList.length != 1) {
       AppSnackbar.error(context, 'Setoran tidak tersedia');
       return;
     }
     await _openSetoran(setoranId);
   }
 
-  Future<void> _openSetoran(String setoranId) async {
-    final santriId = _santri?['id']?.toString();
-    if (!mounted || santriId == null || santriId.isEmpty || _openingSetoran) {
+  Future<void> _openSetoran(String setoranId, {String? santriId}) async {
+    final resolvedSantriId = santriId ?? _santri?['id']?.toString();
+    if (!mounted ||
+        resolvedSantriId == null ||
+        resolvedSantriId.isEmpty ||
+        _openingSetoran) {
       return;
     }
 
@@ -277,7 +486,10 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     await Navigator.push(
       context,
       SlideRoute(
-        page: SetoranDetailScreen(setoranId: setoranId, santriId: santriId),
+        page: SetoranDetailScreen(
+          setoranId: setoranId,
+          santriId: resolvedSantriId,
+        ),
       ),
     );
     _openingSetoran = false;
@@ -287,10 +499,28 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   Future<void> _openNotification(
     Map<String, dynamic> notification,
     String setoranId,
-  ) {
-    return openAfterNotificationRead(
+  ) async {
+    final rawSantriId = notification['santri_id']?.toString().trim();
+    final santriId = rawSantriId == null || rawSantriId.isEmpty
+        ? null
+        : rawSantriId;
+    final hasUnknownSantri =
+        _santriList.isEmpty ||
+        (santriId != null
+            ? parentSantriById(_santriList, santriId) == null
+            : _santriList.length > 1);
+
+    if (hasUnknownSantri) {
+      await _notificationUnavailable(notification);
+      return;
+    }
+
+    await openAfterNotificationRead(
       markAsRead: () => _markNotificationAsRead(notification),
-      open: () => _openSetoran(setoranId),
+      open: () async {
+        if (santriId != null) await _changeSantri(santriId);
+        await _openSetoran(setoranId, santriId: santriId);
+      },
     );
   }
 
@@ -303,7 +533,10 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
   }
 
   Future<void> _loadSetoran(String santriId, {bool loadMore = false}) async {
-    if (loadMore && (!_hasMore || _loadingMore)) return;
+    if (loadMore &&
+        (!_hasMore || _loadingMore || !_isCurrentSantri(santriId))) {
+      return;
+    }
 
     if (loadMore) {
       setState(() => _loadingMore = true);
@@ -322,7 +555,7 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
 
       final newData = List<Map<String, dynamic>>.from(data);
 
-      if (mounted) {
+      if (mounted && _isCurrentSantri(santriId)) {
         setState(() {
           if (loadMore) {
             _setoranList.addAll(newData);
@@ -336,7 +569,9 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _loadingMore = false);
+      if (mounted && _isCurrentSantri(santriId)) {
+        setState(() => _loadingMore = false);
+      }
     }
   }
 
@@ -386,9 +621,46 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
       for (final row in data as List) {
         map[row['juz'] as int] = row['status'] as String;
       }
-      if (mounted) setState(() => _progressMap = map);
+      if (mounted && _isCurrentSantri(santriId)) {
+        setState(() => _progressMap = map);
+      }
     } catch (e) {
       print('Error load progress: $e');
+    }
+  }
+
+  Future<void> _loadTarget(String santriId) async {
+    if (mounted && _isCurrentSantri(santriId)) {
+      setState(() {
+        _targetLoading = true;
+        _targetError = null;
+      });
+    }
+
+    try {
+      final data = await supabase
+          .from('target_hafalan')
+          .select(
+            'judul, deskripsi, juz_target, surah_target, deadline, status',
+          )
+          .eq('santri_id', santriId)
+          .order('deadline');
+
+      if (mounted && _isCurrentSantri(santriId)) {
+        setState(() {
+          _targetList = List<Map<String, dynamic>>.from(data);
+          _targetLoading = false;
+          _targetError = null;
+        });
+      }
+    } catch (_) {
+      if (mounted && _isCurrentSantri(santriId)) {
+        setState(() {
+          _targetList = [];
+          _targetLoading = false;
+          _targetError = 'Target belum dapat dimuat';
+        });
+      }
     }
   }
 
@@ -595,6 +867,54 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                                   color: AppColors.textSecondary,
                                 ),
                               ),
+                              if (_santriList.length > 1) ...[
+                                const SizedBox(height: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.05),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: DropdownButtonHideUnderline(
+                                    child: DropdownButton<String>(
+                                      value: _santri!['id'].toString(),
+                                      isDense: true,
+                                      isExpanded: true,
+                                      dropdownColor: AppColors.bgCard,
+                                      icon: const Icon(
+                                        Icons.keyboard_arrow_down_rounded,
+                                        color: AppColors.gold,
+                                        size: 18,
+                                      ),
+                                      style: const TextStyle(
+                                        color: AppColors.gold,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      items: [
+                                        for (final santri in _santriList)
+                                          DropdownMenuItem<String>(
+                                            value: santri['id'].toString(),
+                                            child: Text(
+                                              santri['nama']?.toString() ??
+                                                  'Tanpa nama',
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                      ],
+                                      onChanged: _isLoading
+                                          ? null
+                                          : (value) {
+                                              if (value != null) {
+                                                _changeSantri(value);
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -679,7 +999,7 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                     labelColor: AppColors.gold,
                     unselectedLabelColor: AppColors.textSecondary,
                     labelStyle: const TextStyle(
-                      fontSize: 12,
+                      fontSize: 11,
                       fontWeight: FontWeight.w600,
                     ),
                     dividerColor: Colors.transparent,
@@ -729,6 +1049,16 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
+                            Icon(Icons.flag_outlined, size: 14),
+                            SizedBox(width: 4),
+                            Text('Target'),
+                          ],
+                        ),
+                      ),
+                      const Tab(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
                             Icon(Icons.map_rounded, size: 14),
                             SizedBox(width: 4),
                             Text('Progress'),
@@ -755,7 +1085,9 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
                           _buildNotifTab(),
                           // Tab 2: Riwayat Setoran
                           _buildSetoranTab(),
-                          // Tab 3: Progress Hafalan
+                          // Tab 3: Target Hafalan
+                          _buildTargetTab(),
+                          // Tab 4: Progress Hafalan
                           _buildProgressTab(),
                         ],
                       ),
@@ -794,10 +1126,37 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
       onRefresh: _loadData,
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(24, 0, 24, 40),
-        itemCount: _notifList.length,
+        itemCount: _notifList.length + 1,
         separatorBuilder: (_, _) => const SizedBox(height: 10),
         itemBuilder: (_, index) {
-          final notif = _notifList[index];
+          if (index == 0) {
+            return Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed:
+                    _deletingNotificationId != null || _deletingAllNotifications
+                    ? null
+                    : _deleteAllNotifications,
+                icon: _deletingAllNotifications
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.redAccent,
+                        ),
+                      )
+                    : const Icon(Icons.delete_sweep_outlined, size: 18),
+                label: const Text('Hapus semua'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                ),
+              ),
+            );
+          }
+
+          final notif = _notifList[index - 1];
           final belumDibaca = notif['dibaca'] == false;
           return Material(
             color: belumDibaca
@@ -812,100 +1171,132 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
               ),
             ),
             clipBehavior: Clip.antiAlias,
-            child: NotificationSetoranTapTarget(
-              notification: notif,
-              onOpen: (id) => _openNotification(notif, id),
-              onUnavailable: () => _notificationUnavailable(notif),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: AppColors.green.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(
-                        Icons.menu_book_rounded,
-                        color: AppColors.greenLight,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: NotificationSetoranTapTarget(
+                    notification: notif,
+                    onOpen: (id) => _openNotification(notif, id),
+                    onUnavailable: () => _notificationUnavailable(notif),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 4, 16),
+                      child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  notif['judul'],
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: AppColors.green.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(
+                              Icons.menu_book_rounded,
+                              color: AppColors.greenLight,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        notif['judul'],
+                                        style: TextStyle(
+                                          color: AppColors.textPrimary,
+                                          fontWeight: belumDibaca
+                                              ? FontWeight.w700
+                                              : FontWeight.w600,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                    if (belumDibaca)
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: const BoxDecoration(
+                                          color: AppColors.gold,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  notif['pesan'],
                                   style: TextStyle(
-                                    color: AppColors.textPrimary,
-                                    fontWeight: belumDibaca
-                                        ? FontWeight.w700
-                                        : FontWeight.w600,
-                                    fontSize: 13,
+                                    fontSize: 12,
+                                    color: AppColors.textPrimary.withValues(
+                                      alpha: 0.72,
+                                    ),
+                                    height: 1.4,
                                   ),
                                 ),
-                              ),
-                              if (belumDibaca)
-                                Container(
-                                  width: 8,
-                                  height: 8,
-                                  decoration: const BoxDecoration(
-                                    color: AppColors.gold,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            notif['pesan'],
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: AppColors.textPrimary.withValues(
-                                alpha: 0.72,
-                              ),
-                              height: 1.4,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            _timeAgo(notif['created_at']),
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: AppColors.textPrimary.withValues(
-                                alpha: 0.65,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            belumDibaca
-                                ? 'Ketuk untuk buka setoran'
-                                : 'Ketuk untuk buka kembali',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: belumDibaca
-                                  ? AppColors.gold
-                                  : AppColors.textPrimary.withValues(
+                                const SizedBox(height: 6),
+                                Text(
+                                  _timeAgo(notif['created_at']),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: AppColors.textPrimary.withValues(
                                       alpha: 0.65,
                                     ),
-                              fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  belumDibaca
+                                      ? 'Ketuk untuk buka setoran'
+                                      : 'Ketuk untuk buka kembali',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: belumDibaca
+                                        ? AppColors.gold
+                                        : AppColors.textPrimary.withValues(
+                                            alpha: 0.65,
+                                          ),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
-              ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 8, right: 4),
+                  child: IconButton(
+                    tooltip: 'Hapus notifikasi',
+                    onPressed:
+                        _deletingNotificationId != null ||
+                            _deletingAllNotifications
+                        ? null
+                        : () => _deleteNotification(notif),
+                    icon: _deletingNotificationId == notif['id']?.toString()
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.redAccent,
+                            ),
+                          )
+                        : const Icon(
+                            Icons.delete_outline_rounded,
+                            color: Colors.redAccent,
+                            size: 20,
+                          ),
+                  ),
+                ),
+              ],
             ),
           );
         },
@@ -933,7 +1324,10 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
         child: Column(
           children: [
             // ← Tambahkan grafik di sini
-            GrafikPerkembangan(santriId: _santri!['id']),
+            GrafikPerkembangan(
+              key: ValueKey(_santri!['id']),
+              santriId: _santri!['id'],
+            ),
             const SizedBox(height: 24),
 
             // Section label
@@ -1229,7 +1623,226 @@ class _OrangTuaHomeScreenState extends State<OrangTuaHomeScreen>
     );
   }
 
+  Widget _buildTargetTab() {
+    final santriId = _santri?['id']?.toString();
+    if (santriId == null || santriId.isEmpty) {
+      return Center(
+        child: Text(
+          'Belum ada data santri',
+          style: TextStyle(color: AppColors.textSecondary),
+        ),
+      );
+    }
+
+    if (_targetLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.gold),
+      );
+    }
+
+    if (_targetError != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_rounded,
+              size: 42,
+              color: AppColors.textMuted,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _targetError!,
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => _loadTarget(santriId),
+              child: const Text('Coba lagi'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      color: AppColors.gold,
+      backgroundColor: AppColors.bgCard,
+      onRefresh: () => _loadTarget(santriId),
+      child: _targetList.isEmpty
+          ? ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(24, 80, 24, 40),
+              children: [
+                Icon(Icons.flag_outlined, size: 48, color: AppColors.textMuted),
+                const SizedBox(height: 12),
+                Center(
+                  child: Text(
+                    'Belum ada target hafalan',
+                    style: TextStyle(color: AppColors.textSecondary),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Center(
+                  child: Text(
+                    'Ustadz belum membuat target untuk santri ini.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+                  ),
+                ),
+              ],
+            )
+          : ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 40),
+              itemCount: _targetList.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (_, index) {
+                final target = _targetList[index];
+                final status = target['status']?.toString();
+                final statusColor = switch (status) {
+                  'selesai' => AppColors.greenLight,
+                  'gagal' => Colors.redAccent,
+                  _ => AppColors.gold,
+                };
+                final details = <String>[
+                  if (target['juz_target'] != null)
+                    'Juz ${target['juz_target']}',
+                  if (target['surah_target'] != null &&
+                      target['surah_target'].toString().trim().isNotEmpty)
+                    target['surah_target'].toString().trim(),
+                ];
+                final description = target['deskripsi']?.toString().trim();
+
+                return Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.03),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: status == 'aktif'
+                          ? AppColors.gold.withOpacity(0.2)
+                          : Colors.white.withOpacity(0.07),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              target['judul']?.toString() ?? 'Target hafalan',
+                              style: const TextStyle(
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: statusColor.withOpacity(0.14),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              parentTargetStatusLabel(status),
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: statusColor,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (description != null && description.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          description,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textSecondary,
+                            height: 1.35,
+                          ),
+                        ),
+                      ],
+                      if (details.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.menu_book_rounded,
+                              size: 15,
+                              color: AppColors.greenLight,
+                            ),
+                            const SizedBox(width: 7),
+                            Expanded(
+                              child: Text(
+                                details.join(', '),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.greenLight,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.event_outlined,
+                            size: 15,
+                            color: statusColor,
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              parentTargetDeadlineLabel(target['deadline']),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: statusColor,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            target['deadline']?.toString().split('T').first ??
+                                'Tanggal belum diatur',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: AppColors.textMuted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
   Widget _buildProgressTab() {
+    if (_santri == null) {
+      return Center(
+        child: Text(
+          'Belum ada data santri',
+          style: TextStyle(color: AppColors.textSecondary),
+        ),
+      );
+    }
+
     final totalHafal = _progressMap.values.where((s) => s == 'hafal').length;
     final totalSedang = _progressMap.values.where((s) => s == 'sedang').length;
     final persen = (totalHafal / 30 * 100).toInt();

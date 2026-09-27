@@ -496,8 +496,10 @@ class _RiwayatSetoranScreenState extends State<RiwayatSetoranScreen> {
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) =>
-                              InputSetoranScreen(santri: widget.santri),
+                          builder: (_) => InputSetoranScreen(
+                            santri: widget.santri,
+                            onOpenHistory: () => Navigator.pop(context),
+                          ),
                         ),
                       ).then((_) => _loadSetoran()),
                       child: Container(

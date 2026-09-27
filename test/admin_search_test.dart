@@ -54,4 +54,25 @@ void main() {
       isEmpty,
     );
   });
+
+  test('menerapkan filter kelas, kamar, dan jenis kelamin', () {
+    final santri = [
+      {'nama': 'Ahmad', 'kelas': 'A', 'kamar': '1', 'jenis_kelamin': 'L'},
+      {'nama': 'Siti', 'kelas': 'A', 'kamar': '2', 'jenis_kelamin': 'P'},
+      {'nama': 'Umar', 'kelas': 'B', 'kamar': '1', 'jenis_kelamin': 'L'},
+    ];
+
+    final result = filterSantriRecords(
+      santri,
+      '',
+      filters: const SantriFilterValues(
+        kelas: 'A',
+        kamar: '2',
+        jenisKelamin: 'P',
+      ),
+      getSearchFields: fields,
+    );
+
+    expect(result.map((record) => record['nama']), ['Siti']);
+  });
 }

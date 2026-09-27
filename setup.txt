@@ -47,6 +47,18 @@ E. KONFIGURASI SUPABASE
    SUPABASE_URL=https://xxx.supabase.co
    SUPABASE_ANON_KEY=xxxxx
 
+E.1 KONFIGURASI CAPTCHA LOGIN
+-----------------------------
+1. Buat Cloudflare Turnstile widget dengan mode Non-Interactive.
+2. Tambahkan domain widget ke daftar domain yang diizinkan, lalu isi .env:
+   TURNSTILE_SITE_KEY=<sitekey_publik>
+   TURNSTILE_BASE_URL=https://domain-widget-anda.example/
+3. Di Supabase Dashboard buka Authentication > Bot and Abuse Protection,
+   aktifkan CAPTCHA Protection, pilih Cloudflare Turnstile, lalu masukkan
+   Secret Key Cloudflare. Secret Key tidak boleh dimasukkan ke aplikasi.
+4. Pastikan privacy policy aplikasi mencantumkan referensi Cloudflare Turnstile
+   Privacy Addendum sebelum rilis production.
+
 F. BUILD APK RELEASE
 --------------------
    flutter build apk --release

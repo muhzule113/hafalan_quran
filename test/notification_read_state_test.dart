@@ -20,6 +20,19 @@ void main() {
     expect(notifications[0]['dibaca'], isFalse);
   });
 
+  test('hanya notifikasi yang dipilih terhapus', () {
+    final notifications = <Map<String, dynamic>>[
+      {'id': 'notif-1', 'dibaca': false},
+      {'id': 'notif-2', 'dibaca': true},
+    ];
+
+    final result = notificationsWithoutId(notifications, 'notif-1');
+
+    expect(result, hasLength(1));
+    expect(result.single['id'], 'notif-2');
+    expect(notifications, hasLength(2));
+  });
+
   test('payload notifikasi hanya menerima setoran_id yang valid', () {
     expect(notificationSetoranId({'setoran_id': 'setoran-42'}), 'setoran-42');
     expect(notificationSetoranId({'setoran_id': '  '}), isNull);

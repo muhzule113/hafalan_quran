@@ -6,6 +6,7 @@ import '../auth/login_screen.dart';
 import '../profil/profil_screen.dart';
 import 'kelola_santri_screen.dart';
 import 'kelola_ustadz_screen.dart';
+import 'pembagian_ustadz_screen.dart';
 import '../../widgets/konfirmasi_dialog.dart';
 import '../../utils/app_routes.dart';
 
@@ -239,6 +240,17 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
                           onTap: () => Navigator.push(
                             context,
                             FadeRoute(page: const KelolaUstadzScreen()),
+                          ).then((_) => _loadData()),
+                        ),
+                        const SizedBox(height: 10),
+                        _MenuCard(
+                          icon: Icons.assignment_ind_rounded,
+                          title: 'Pembagian Santri',
+                          subtitle: 'Atur ustadz penerima setoran per kelas',
+                          accentColor: AppColors.gold,
+                          onTap: () => Navigator.push(
+                            context,
+                            FadeRoute(page: const PembagianUstadzScreen()),
                           ).then((_) => _loadData()),
                         ),
                       ],

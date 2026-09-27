@@ -10,6 +10,8 @@ import '../../widgets/skeleton_loader.dart';
 import '../../widgets/error_state.dart';
 import '../../widgets/konfirmasi_dialog.dart';
 import '../../utils/app_routes.dart';
+import '../../utils/search_utils.dart';
+import '../../widgets/santri_filter_sheet.dart';
 
 class UstadzHomeScreen extends StatefulWidget {
   const UstadzHomeScreen({super.key});
@@ -24,7 +26,8 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
   String _namaUstadz = 'Ustadz';
 
   final _searchController = TextEditingController();
-  List<Map<String, dynamic>> _filteredList = [];
+  String _searchQuery = '';
+  SantriFilterValues _filters = const SantriFilterValues();
 
   bool _hasError = false;
 
@@ -50,12 +53,12 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
           .from('santri')
           .select()
           .eq('aktif', true)
+          .eq('ustadz_id', userId)
           .order('nama');
       if (mounted) {
         setState(() {
           _namaUstadz = profile['nama'] ?? 'Ustadz';
           _santriList = List<Map<String, dynamic>>.from(santri);
-          _filteredList = List<Map<String, dynamic>>.from(santri);
           _isLoading = false;
         });
       }
@@ -68,25 +71,17 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
     }
   }
 
-  void _filterSantri(String query) {
-    setState(() {
-      _filteredList = _santriList
-          .where(
-            (s) =>
-                s['nama'].toString().toLowerCase().contains(
-                  query.toLowerCase(),
-                ) ||
-                (s['kelas'] ?? '').toString().toLowerCase().contains(
-                  query.toLowerCase(),
-                ) ||
-                (s['kamar'] ?? '').toString().toLowerCase().contains(
-                  query.toLowerCase(),
-                ) ||
-                (s['nis'] ?? '').toString().contains(query),
-          )
-          .toList();
-    });
-  }
+  List<Map<String, dynamic>> get _filteredList => filterSantriRecords(
+    _santriList,
+    _searchQuery,
+    filters: _filters,
+    getSearchFields: (santri) => [
+      santri['nama']?.toString(),
+      santri['kelas']?.toString(),
+      santri['kamar']?.toString(),
+      santri['nis']?.toString(),
+    ],
+  );
 
   @override
   void dispose() {
@@ -140,7 +135,15 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => InputSetoranScreen(santri: santri),
+                    builder: (_) => InputSetoranScreen(
+                      santri: santri,
+                      onOpenHistory: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => RiwayatSetoranScreen(santri: santri),
+                        ),
+                      ),
+                    ),
                   ),
                 ).then((_) => _loadData());
               },
@@ -353,10 +356,14 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.person_rounded,
-                          color: AppColors.textSecondary),
-                      onPressed: () => Navigator.push(context,
-                          MaterialPageRoute(builder: (_) => const ProfilScreen())),
+                      icon: const Icon(
+                        Icons.person_rounded,
+                        color: AppColors.textSecondary,
+                      ),
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const ProfilScreen()),
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(
@@ -396,36 +403,50 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
 
               Padding(
                 padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
-                child: TextField(
-                  controller: _searchController,
-                  style: const TextStyle(color: AppColors.textPrimary),
-                  onChanged: _filterSantri,
-                  onTapOutside: (_) => FocusScope.of(context).unfocus(),
-                  decoration: InputDecoration(
-                    hintText: 'Cari santri...',
-                    hintStyle: TextStyle(
-                      color: AppColors.textMuted,
-                      fontSize: 13,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        style: const TextStyle(color: AppColors.textPrimary),
+                        onChanged: (query) =>
+                            setState(() => _searchQuery = query),
+                        onTapOutside: (_) => FocusScope.of(context).unfocus(),
+                        decoration: InputDecoration(
+                          hintText: 'Cari santri...',
+                          hintStyle: TextStyle(
+                            color: AppColors.textMuted,
+                            fontSize: 13,
+                          ),
+                          prefixIcon: const Icon(
+                            Icons.search_rounded,
+                            color: AppColors.textSecondary,
+                            size: 20,
+                          ),
+                          suffixIcon: _searchController.text.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(
+                                    Icons.clear_rounded,
+                                    color: AppColors.textSecondary,
+                                    size: 18,
+                                  ),
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    setState(() => _searchQuery = '');
+                                  },
+                                )
+                              : null,
+                        ),
+                      ),
                     ),
-                    prefixIcon: const Icon(
-                      Icons.search_rounded,
-                      color: AppColors.textSecondary,
-                      size: 20,
+                    const SizedBox(width: 8),
+                    SantriFilterButton(
+                      santriList: _santriList,
+                      filters: _filters,
+                      onChanged: (filters) =>
+                          setState(() => _filters = filters),
                     ),
-                    suffixIcon: _searchController.text.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(
-                              Icons.clear_rounded,
-                              color: AppColors.textSecondary,
-                              size: 18,
-                            ),
-                            onPressed: () {
-                              _searchController.clear();
-                              _filterSantri('');
-                            },
-                          )
-                        : null,
-                  ),
+                  ],
                 ),
               ),
 
@@ -446,7 +467,8 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              _searchController.text.isEmpty
+                              _searchController.text.trim().isEmpty &&
+                                      !_filters.isActive
                                   ? 'Belum ada santri'
                                   : 'Santri tidak ditemukan',
                               style: TextStyle(color: AppColors.textSecondary),
@@ -465,6 +487,10 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
                               const SizedBox(height: 10),
                           itemBuilder: (_, index) {
                             final s = _filteredList[index];
+                            final nis = s['nis']?.toString().trim();
+                            final displayNis = nis?.isNotEmpty == true
+                                ? nis
+                                : '-';
                             return InkWell(
                               onTap: () => _showPilihanSheet(context, s),
                               child: Container(
@@ -501,13 +527,37 @@ class _UstadzHomeScreenState extends State<UstadzHomeScreen> {
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
                                         children: [
-                                          Text(
-                                            s['nama'],
-                                            style: const TextStyle(
-                                              color: AppColors.textPrimary,
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 14,
-                                            ),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  s['nama'].toString(),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    color:
+                                                        AppColors.textPrimary,
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Flexible(
+                                                child: Text(
+                                                  'NIS: $displayNis',
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    color: AppColors.gold,
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
                                           const SizedBox(height: 3),
                                           Text(

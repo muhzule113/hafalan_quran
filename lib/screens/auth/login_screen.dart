@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:cloudflare_turnstile/cloudflare_turnstile.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/supabase_client.dart';
@@ -8,8 +12,24 @@ import '../ustadz/home_screen.dart';
 import '../orang_tua/home_screen.dart';
 import '../../services/notification_service.dart';
 
+typedef CaptchaTokenProvider = Future<String?> Function();
+
+typedef PasswordSignIn =
+    Future<AuthResponse> Function({
+      required String email,
+      required String password,
+      required String captchaToken,
+    });
+
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({
+    super.key,
+    this.captchaTokenProvider,
+    this.signInWithPassword,
+  });
+
+  final CaptchaTokenProvider? captchaTokenProvider;
+  final PasswordSignIn? signInWithPassword;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -25,6 +45,8 @@ class _LoginScreenState extends State<LoginScreen>
   late Animation<double> _fadeAnim;
   String? _emailError;
   String? _passwordError;
+  final TurnstileController _captchaController = TurnstileController();
+  Completer<String?>? _captchaCompleter;
 
   @override
   void initState() {
@@ -38,6 +60,8 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   Future<void> _login() async {
+    if (_isLoading) return;
+
     setState(() {
       _emailError = null;
       _passwordError = null;
@@ -60,11 +84,25 @@ class _LoginScreenState extends State<LoginScreen>
     }
     if (!valid) return;
 
+    if (widget.captchaTokenProvider == null && !_isCaptchaConfigured) {
+      _showError('Verifikasi keamanan belum dikonfigurasi');
+      return;
+    }
+
     setState(() => _isLoading = true);
     try {
-      final response = await supabase.auth.signInWithPassword(
+      final captchaToken =
+          await (widget.captchaTokenProvider ?? _requestTurnstileToken)();
+      if (!mounted) return;
+      if (captchaToken == null || captchaToken.trim().isEmpty) {
+        _showError('Verifikasi keamanan gagal, coba lagi');
+        return;
+      }
+
+      final response = await (widget.signInWithPassword ?? _signInWithPassword)(
         email: _emailController.text.trim(),
         password: _passwordController.text,
+        captchaToken: captchaToken,
       );
       if (response.user != null) {
         final profile = await supabase
@@ -94,24 +132,101 @@ class _LoginScreenState extends State<LoginScreen>
           MaterialPageRoute(builder: (_) => home),
         );
       }
+    } on TurnstileException {
+      _showError('Verifikasi keamanan gagal, coba lagi');
     } on AuthException catch (e) {
-      _showError(e.message);
-    } catch (e) {
+      _showError(e.message, code: e.code);
+    } catch (_) {
       _showError('Terjadi kesalahan, coba lagi');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _showError(String message) {
+  bool get _isCaptchaConfigured {
+    if (!dotenv.isInitialized) return false;
+
+    final siteKey = dotenv.env['TURNSTILE_SITE_KEY']?.trim();
+    final baseUrl = dotenv.env['TURNSTILE_BASE_URL']?.trim();
+    return siteKey?.isNotEmpty == true && baseUrl?.isNotEmpty == true;
+  }
+
+  Future<String?> _requestTurnstileToken() async {
+    final pending = _captchaCompleter;
+    if (pending != null) return pending.future;
+
+    final completer = Completer<String?>();
+    _captchaCompleter = completer;
+
+    if (_captchaController.isWidgetReady) {
+      try {
+        await _captchaController.refreshToken();
+      } catch (error, stackTrace) {
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      }
+    }
+
+    return completer.future;
+  }
+
+  void _handleCaptchaToken(String token) {
+    final completer = _captchaCompleter;
+    _captchaCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(token);
+    }
+  }
+
+  void _handleCaptchaExpired() {
+    final completer = _captchaCompleter;
+    _captchaCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(null);
+    }
+  }
+
+  void _handleCaptchaError(TurnstileException error) {
+    final completer = _captchaCompleter;
+    _captchaCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(error);
+    }
+  }
+
+  void _handleCaptchaTimeout() {
+    final completer = _captchaCompleter;
+    _captchaCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(null);
+    }
+  }
+
+  Future<AuthResponse> _signInWithPassword({
+    required String email,
+    required String password,
+    required String captchaToken,
+  }) {
+    return supabase.auth.signInWithPassword(
+      email: email,
+      password: password,
+      captchaToken: captchaToken,
+    );
+  }
+
+  void _showError(String message, {String? code}) {
     String pesan = message;
-    if (message.contains('Invalid login credentials')) {
+    final lowerMessage = message.toLowerCase();
+    if (code == 'captcha_failed' || lowerMessage.contains('captcha')) {
+      pesan = 'Verifikasi keamanan gagal, coba lagi';
+    } else if (message.contains('Invalid login credentials')) {
       pesan = 'Email atau password salah';
     } else if (message.contains('Email not confirmed')) {
       pesan = 'Email belum dikonfirmasi';
     } else if (message.contains('Too many requests')) {
       pesan = 'Terlalu banyak percobaan, coba lagi nanti';
-    } else if (message.contains('network')) {
+    } else if (lowerMessage.contains('network')) {
       pesan = 'Tidak ada koneksi internet';
     }
 
@@ -138,10 +253,28 @@ class _LoginScreenState extends State<LoginScreen>
 
   @override
   void dispose() {
+    _captchaCompleter?.complete(null);
+    _captchaController.dispose();
     _animController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  bool get _shouldRenderCaptcha =>
+      widget.captchaTokenProvider == null && _isCaptchaConfigured;
+
+  Widget _buildCaptchaWidget() {
+    return CloudflareTurnstile(
+      siteKey: dotenv.env['TURNSTILE_SITE_KEY']!.trim(),
+      baseUrl: dotenv.env['TURNSTILE_BASE_URL']!.trim(),
+      action: 'login',
+      controller: _captchaController,
+      onTokenReceived: _handleCaptchaToken,
+      onTokenExpired: _handleCaptchaExpired,
+      onError: _handleCaptchaError,
+      onTimeout: _handleCaptchaTimeout,
+    );
   }
 
   @override
@@ -289,6 +422,11 @@ class _LoginScreenState extends State<LoginScreen>
                       ),
                     ),
                   ),
+
+                  if (_shouldRenderCaptcha) ...[
+                    const SizedBox(height: 20),
+                    _buildCaptchaWidget(),
+                  ],
 
                   const SizedBox(height: 28),
 

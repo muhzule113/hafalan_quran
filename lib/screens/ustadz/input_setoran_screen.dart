@@ -1,7 +1,10 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../theme/app_theme.dart';
@@ -11,7 +14,13 @@ import '../../data/surah_data.dart';
 
 class InputSetoranScreen extends StatefulWidget {
   final Map<String, dynamic> santri;
-  const InputSetoranScreen({super.key, required this.santri});
+  final VoidCallback onOpenHistory;
+
+  const InputSetoranScreen({
+    super.key,
+    required this.santri,
+    required this.onOpenHistory,
+  });
 
   @override
   State<InputSetoranScreen> createState() => _InputSetoranScreenState();
@@ -29,47 +38,95 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
   bool _isSaving = false;
   bool _recorderReady = false;
   String? _audioPath;
+  String? _audioUrl;
   Duration _recordDuration = Duration.zero;
 
   String _status = 'menunggu';
+  List<Map<String, dynamic>> _riwayatList = [];
+  bool _isLoadingRiwayat = true;
+  String? _riwayatError;
 
   @override
   void initState() {
     super.initState();
     _initRecorder();
+    _loadRiwayat();
+  }
+
+  Future<void> _loadRiwayat() async {
+    if (mounted) {
+      setState(() {
+        _isLoadingRiwayat = true;
+        _riwayatError = null;
+      });
+    }
+
+    try {
+      final data = await supabase
+          .from('setoran')
+          .select('id, surah, ayat_mulai, ayat_selesai, status, tanggal')
+          .eq('santri_id', widget.santri['id'])
+          .order('tanggal', ascending: false)
+          .limit(5);
+
+      if (!mounted) return;
+      setState(() {
+        _riwayatList = List<Map<String, dynamic>>.from(data);
+        _isLoadingRiwayat = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingRiwayat = false;
+        _riwayatError = 'Riwayat tidak dapat dimuat';
+      });
+    }
   }
 
   Future<void> _initRecorder() async {
-    final micStatus = await Permission.microphone.request();
-    if (micStatus != PermissionStatus.granted) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Izin mikrofon diperlukan'),
-            backgroundColor: Colors.red,
-          ),
-        );
+    if (!kIsWeb) {
+      final micStatus = await Permission.microphone.request();
+      if (micStatus != PermissionStatus.granted) {
+        if (mounted) _showSnack('Izin mikrofon diperlukan');
+        return;
       }
-      return;
     }
-    await _recorder.openRecorder();
-    setState(() => _recorderReady = true);
+
+    try {
+      await _recorder.openRecorder();
+      if (mounted) setState(() => _recorderReady = true);
+    } catch (e) {
+      if (mounted) _showSnack('Gagal menyiapkan perekam: $e');
+    }
   }
 
   Future<void> _toggleRecording() async {
-    if (!_recorderReady) return;
+    if (!_recorderReady) {
+      _showSnack('Perekam belum siap, coba lagi');
+      return;
+    }
 
-    if (_isRecording) {
-      await _stopRecording();
-    } else {
-      await _startRecording();
+    try {
+      if (_isRecording) {
+        await _stopRecording();
+      } else {
+        await _startRecording();
+      }
+    } catch (e) {
+      if (mounted) _showSnack('Gagal merekam: $e');
     }
   }
 
   Future<void> _startRecording() async {
-    final dir = await getTemporaryDirectory();
-    _audioPath =
-        '${dir.path}/setoran_${DateTime.now().millisecondsSinceEpoch}.aac';
+    final extension = kIsWeb ? 'webm' : 'aac';
+    if (kIsWeb) {
+      _audioPath =
+          'setoran_${DateTime.now().millisecondsSinceEpoch}.$extension';
+    } else {
+      final dir = await getTemporaryDirectory();
+      _audioPath =
+          '${dir.path}/setoran_${DateTime.now().millisecondsSinceEpoch}.$extension';
+    }
 
     await _recorder.setSubscriptionDuration(const Duration(milliseconds: 500));
 
@@ -79,20 +136,25 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
       }
     });
 
-    await _recorder.startRecorder(toFile: _audioPath, codec: Codec.aacADTS);
+    await _recorder.startRecorder(
+      toFile: _audioPath,
+      codec: kIsWeb ? Codec.opusWebM : Codec.aacADTS,
+    );
 
     setState(() {
       _isRecording = true;
       _isRecorded = false;
+      _audioUrl = null;
       _recordDuration = Duration.zero;
     });
   }
 
   Future<void> _stopRecording() async {
-    await _recorder.stopRecorder();
+    final audioUrl = await _recorder.stopRecorder();
     setState(() {
       _isRecording = false;
       _isRecorded = true;
+      _audioUrl = kIsWeb ? audioUrl : null;
     });
   }
 
@@ -103,7 +165,7 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
       _showSnack('Surah dan ayat wajib diisi');
       return;
     }
-    if (!_isRecorded || _audioPath == null) {
+    if (!_isRecorded || (kIsWeb ? _audioUrl == null : _audioPath == null)) {
       _showSnack('Rekam audio hafalan terlebih dahulu');
       return;
     }
@@ -112,6 +174,16 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
 
     try {
       final userId = supabase.auth.currentUser!.id;
+      final assignment = await supabase
+          .from('santri')
+          .select('ustadz_id')
+          .eq('id', widget.santri['id'])
+          .eq('aktif', true)
+          .maybeSingle();
+      if (assignment == null || assignment['ustadz_id'] != userId) {
+        throw Exception('Santri sudah tidak ditugaskan kepada ustadz ini');
+      }
+
       final ustadzProfile = await supabase
           .from('profiles')
           .select('nama')
@@ -119,11 +191,23 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
           .single();
 
       // Upload audio ke Supabase Storage
-      final audioFile = File(_audioPath!);
+      final extension = kIsWeb ? 'webm' : 'aac';
       final fileName =
-          'setoran/${widget.santri['id']}/${DateTime.now().millisecondsSinceEpoch}.aac';
+          'setoran/${widget.santri['id']}/${DateTime.now().millisecondsSinceEpoch}.$extension';
 
-      await supabase.storage.from('audio-setoran').upload(fileName, audioFile);
+      if (kIsWeb) {
+        final response = await http.get(Uri.parse(_audioUrl!));
+        if (response.statusCode != 200) {
+          throw Exception('Gagal membaca hasil rekaman');
+        }
+        await supabase.storage
+            .from('audio-setoran')
+            .uploadBinary(fileName, response.bodyBytes);
+      } else {
+        await supabase.storage
+            .from('audio-setoran')
+            .upload(fileName, File(_audioPath!));
+      }
 
       final audioUrl = supabase.storage
           .from('audio-setoran')
@@ -159,11 +243,12 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
       );
 
       if (mounted) {
+        _resetForm();
         _showSnack(
           'Setoran berhasil disimpan & notifikasi terkirim!',
           isSuccess: true,
         );
-        Navigator.pop(context);
+        await _loadRiwayat();
       }
     } catch (e) {
       if (mounted) {
@@ -189,6 +274,243 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  void _resetForm() {
+    _ayatMulaiController.clear();
+    _ayatSelesaiController.clear();
+    _catatanController.clear();
+    setState(() {
+      _selectedSurah = null;
+      _isRecording = false;
+      _isRecorded = false;
+      _audioPath = null;
+      _audioUrl = null;
+      _recordDuration = Duration.zero;
+      _status = 'menunggu';
+    });
+  }
+
+  Color _riwayatStatusColor(String? status) {
+    switch (status) {
+      case 'diterima':
+        return AppColors.green;
+      case 'diulang':
+        return Colors.orange;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  String _riwayatStatusLabel(String? status) {
+    switch (status) {
+      case 'diterima':
+        return 'Diterima';
+      case 'diulang':
+        return 'Diulang';
+      default:
+        return 'Menunggu';
+    }
+  }
+
+  String _timeAgo(String? dateStr) {
+    final date = dateStr == null ? null : DateTime.tryParse(dateStr)?.toLocal();
+    if (date == null) return 'Tanggal tidak tersedia';
+
+    final diff = DateTime.now().difference(date);
+    if (diff.isNegative || diff.inMinutes < 1) return 'Baru saja';
+    if (diff.inMinutes < 60) return '${diff.inMinutes} menit lalu';
+    if (diff.inHours < 24) return '${diff.inHours} jam lalu';
+    return '${diff.inDays} hari lalu';
+  }
+
+  Widget _buildRiwayatSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 28),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const _SectionLabel(label: 'RIWAYAT SETORAN'),
+            TextButton(
+              onPressed: widget.onOpenHistory,
+              style: TextButton.styleFrom(
+                foregroundColor: AppColors.gold,
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                minimumSize: const Size(0, 44),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Lihat semua'),
+                  SizedBox(width: 4),
+                  Icon(Icons.arrow_forward_ios_rounded, size: 12),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_isLoadingRiwayat)
+          const SizedBox(
+            height: 56,
+            child: Center(
+              child: CircularProgressIndicator(
+                color: AppColors.gold,
+                strokeWidth: 2,
+              ),
+            ),
+          )
+        else if (_riwayatError != null)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white.withOpacity(0.07)),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.cloud_off_rounded,
+                  color: AppColors.textSecondary,
+                  size: 18,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _riwayatError!,
+                    style: const TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _loadRiwayat,
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.gold,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 8,
+                    ),
+                    minimumSize: const Size(0, 44),
+                  ),
+                  child: const Text('Coba lagi'),
+                ),
+              ],
+            ),
+          )
+        else if (_riwayatList.isEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white.withOpacity(0.07)),
+            ),
+            child: const Row(
+              children: [
+                Icon(
+                  Icons.menu_book_outlined,
+                  color: AppColors.textMuted,
+                  size: 20,
+                ),
+                SizedBox(width: 10),
+                Text(
+                  'Belum ada riwayat setoran',
+                  style: TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else ...[
+          for (var index = 0; index < _riwayatList.length; index++) ...[
+            _buildRiwayatCard(_riwayatList[index]),
+            if (index < _riwayatList.length - 1) const SizedBox(height: 10),
+          ],
+        ],
+      ],
+    );
+  }
+
+  Widget _buildRiwayatCard(Map<String, dynamic> setoran) {
+    final status = setoran['status']?.toString();
+    final statusColor = _riwayatStatusColor(status);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withOpacity(0.07)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: AppColors.green.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.menu_book_outlined,
+              color: AppColors.greenLight,
+              size: 18,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${setoran['surah'] ?? '-'} - ${setoran['ayat_mulai'] ?? '-'}-${setoran['ayat_selesai'] ?? '-'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  _timeAgo(setoran['tanggal']?.toString()),
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: statusColor.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: statusColor.withOpacity(0.3)),
+            ),
+            child: Text(
+              _riwayatStatusLabel(status),
+              style: TextStyle(
+                color: statusColor,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -359,6 +681,7 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                                     onTap: () => setState(() {
                                       _isRecorded = false;
                                       _audioPath = null;
+                                      _audioUrl = null;
                                     }),
                                     child: Container(
                                       padding: const EdgeInsets.symmetric(
@@ -545,6 +868,9 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                             child: TextField(
                               controller: _ayatMulaiController,
                               keyboardType: TextInputType.number,
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                              ],
                               style: const TextStyle(
                                 color: AppColors.textPrimary,
                               ),
@@ -558,6 +884,9 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                             child: TextField(
                               controller: _ayatSelesaiController,
                               keyboardType: TextInputType.number,
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                              ],
                               style: const TextStyle(
                                 color: AppColors.textPrimary,
                               ),
@@ -661,6 +990,7 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                                 ),
                         ),
                       ),
+                      _buildRiwayatSection(),
                     ],
                   ),
                 ),
