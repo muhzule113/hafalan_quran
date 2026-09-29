@@ -49,14 +49,20 @@ E. KONFIGURASI SUPABASE
 
 E.1 KONFIGURASI CAPTCHA LOGIN
 -----------------------------
-1. Buat Cloudflare Turnstile widget dengan mode Non-Interactive.
+1. Buat Cloudflare Turnstile widget dengan mode Invisible.
 2. Tambahkan domain widget ke daftar domain yang diizinkan, lalu isi .env:
    TURNSTILE_SITE_KEY=<sitekey_publik>
    TURNSTILE_BASE_URL=https://domain-widget-anda.example/
 3. Di Supabase Dashboard buka Authentication > Bot and Abuse Protection,
    aktifkan CAPTCHA Protection, pilih Cloudflare Turnstile, lalu masukkan
    Secret Key Cloudflare. Secret Key tidak boleh dimasukkan ke aplikasi.
-4. Pastikan privacy policy aplikasi mencantumkan referensi Cloudflare Turnstile
+4. Terapkan migration CAPTCHA dan deploy Edge Function:
+   supabase db push
+   supabase secrets set CAPTCHA_HMAC_SECRET=<secret-acak-panjang>
+   supabase functions deploy captcha-challenge --no-verify-jwt
+   SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY dipakai dari environment bawaan
+   Supabase Edge Functions; jangan masukkan service role key ke aplikasi.
+5. Pastikan privacy policy aplikasi mencantumkan referensi Cloudflare Turnstile
    Privacy Addendum sebelum rilis production.
 
 F. BUILD APK RELEASE
