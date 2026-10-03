@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/supabase_client.dart';
+import '../../utils/ayat_validation.dart';
 import '../../widgets/surah_picker.dart';
 import '../../data/surah_data.dart';
 
@@ -159,12 +160,34 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
   }
 
   Future<void> _simpanSetoran() async {
-    if (_selectedSurah == null || // ← ubah ini
+    if (_selectedSurah == null ||
         _ayatMulaiController.text.isEmpty ||
         _ayatSelesaiController.text.isEmpty) {
       _showSnack('Surah dan ayat wajib diisi');
       return;
     }
+
+    final maxAyat = _selectedSurah!.jumlahAyat;
+    final ayatMulaiError = validateAyatValue(
+      _ayatMulaiController.text,
+      maxAyat,
+    );
+    final ayatSelesaiError = validateAyatValue(
+      _ayatSelesaiController.text,
+      maxAyat,
+    );
+    if (ayatMulaiError != null || ayatSelesaiError != null) {
+      _showSnack(ayatMulaiError ?? ayatSelesaiError!);
+      return;
+    }
+
+    final ayatMulai = int.tryParse(_ayatMulaiController.text);
+    final ayatSelesai = int.tryParse(_ayatSelesaiController.text);
+    if (ayatMulai == null || ayatSelesai == null) {
+      _showSnack('Nomor ayat tidak valid');
+      return;
+    }
+
     if (!_isRecorded || (kIsWeb ? _audioUrl == null : _audioPath == null)) {
       _showSnack('Rekam audio hafalan terlebih dahulu');
       return;
@@ -220,8 +243,8 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
             'santri_id': widget.santri['id'],
             'ustadz_id': userId,
             'surah': _selectedSurah!.namaLatin,
-            'ayat_mulai': int.parse(_ayatMulaiController.text),
-            'ayat_selesai': int.parse(_ayatSelesaiController.text),
+            'ayat_mulai': ayatMulai,
+            'ayat_selesai': ayatSelesai,
             'audio_url': audioUrl,
             'status': _status,
             'catatan': _catatanController.text.trim(),
@@ -237,8 +260,8 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
           'santri_id': widget.santri['id'],
           'surah': _selectedSurah!.namaLatin,
           'ustadz_nama': ustadzProfile['nama'],
-          'ayat_mulai': int.parse(_ayatMulaiController.text),
-          'ayat_selesai': int.parse(_ayatSelesaiController.text),
+          'ayat_mulai': ayatMulai,
+          'ayat_selesai': ayatSelesai,
         },
       );
 
@@ -274,6 +297,20 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  String? _ayatErrorText(String value) {
+    final maxAyat = _selectedSurah?.jumlahAyat;
+    if (maxAyat == null) return null;
+    return validateAyatValue(value, maxAyat);
+  }
+
+  List<TextInputFormatter> _ayatInputFormatters() {
+    return [
+      FilteringTextInputFormatter.digitsOnly,
+      if (_selectedSurah != null)
+        AyatLimitInputFormatter(maxAyat: _selectedSurah!.jumlahAyat),
+    ];
   }
 
   void _resetForm() {
@@ -785,8 +822,6 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                             onSelected: (surah) {
                               setState(() {
                                 _selectedSurah = surah;
-                                // Auto update max ayat
-                                _ayatSelesaiController.text = '';
                               });
                             },
                           ),
@@ -868,14 +903,19 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                             child: TextField(
                               controller: _ayatMulaiController,
                               keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
+                              inputFormatters: _ayatInputFormatters(),
+                              onChanged: (_) => setState(() {}),
                               style: const TextStyle(
                                 color: AppColors.textPrimary,
                               ),
-                              decoration: const InputDecoration(
+                              decoration: InputDecoration(
                                 labelText: 'Ayat Mulai',
+                                helperText: _selectedSurah == null
+                                    ? null
+                                    : 'Maksimal ${_selectedSurah!.jumlahAyat}',
+                                errorText: _ayatErrorText(
+                                  _ayatMulaiController.text,
+                                ),
                               ),
                             ),
                           ),
@@ -884,14 +924,19 @@ class _InputSetoranScreenState extends State<InputSetoranScreen> {
                             child: TextField(
                               controller: _ayatSelesaiController,
                               keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                              ],
+                              inputFormatters: _ayatInputFormatters(),
+                              onChanged: (_) => setState(() {}),
                               style: const TextStyle(
                                 color: AppColors.textPrimary,
                               ),
-                              decoration: const InputDecoration(
+                              decoration: InputDecoration(
                                 labelText: 'Ayat Selesai',
+                                helperText: _selectedSurah == null
+                                    ? null
+                                    : 'Maksimal ${_selectedSurah!.jumlahAyat}',
+                                errorText: _ayatErrorText(
+                                  _ayatSelesaiController.text,
+                                ),
                               ),
                             ),
                           ),
