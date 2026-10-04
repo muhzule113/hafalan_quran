@@ -6,6 +6,18 @@ import 'package:hafalan_quran/screens/auth/login_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
+  test(
+    'token Turnstile yang sudah diterima dipakai sekali sebelum refresh',
+    () {
+      final cache = TurnstileTokenCache();
+
+      cache.store('  pre-issued-token  ');
+
+      expect(cache.take(), 'pre-issued-token');
+      expect(cache.take(), isNull);
+    },
+  );
+
   const challenge = CaptchaChallenge(
     id: 'challenge-1',
     svg:

@@ -46,5 +46,6 @@ app.*.map.json
 /android/app/release
 .env
 .firebase/
+supabase/.temp/
 android/key.properties
 android/app/hafalan-quran.keystore

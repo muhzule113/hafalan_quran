@@ -23,6 +23,23 @@ class CaptchaChallenge {
   final String svg;
 }
 
+class TurnstileTokenCache {
+  String? _token;
+
+  void store(String token) {
+    final normalizedToken = token.trim();
+    _token = normalizedToken.isEmpty ? null : normalizedToken;
+  }
+
+  String? take() {
+    final token = _token;
+    _token = null;
+    return token;
+  }
+
+  void clear() => _token = null;
+}
+
 typedef CaptchaChallengeProvider = Future<CaptchaChallenge> Function();
 
 typedef CaptchaVerifier =
@@ -73,6 +90,7 @@ class _LoginScreenState extends State<LoginScreen>
   final _captchaAnswerController = TextEditingController();
   CloudflareTurnstile? _invisibleTurnstile;
   Completer<String?>? _captchaCompleter;
+  final _turnstileTokenCache = TurnstileTokenCache();
 
   @override
   void initState() {
@@ -288,6 +306,7 @@ class _LoginScreenState extends State<LoginScreen>
 
   void _initializeInvisibleTurnstile() {
     if (widget.captchaTokenProvider != null || !_isCaptchaConfigured) return;
+    if (_invisibleTurnstile != null) return;
 
     try {
       _invisibleTurnstile = CloudflareTurnstile.invisible(
@@ -304,14 +323,44 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   Future<String?> _requestTurnstileToken() async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final token = await _requestTurnstileTokenOnce();
+        if (token != null && token.trim().isNotEmpty) return token.trim();
+      } catch (_) {
+        // Recreate the widget below so a transient WebView/Turnstile failure
+        // does not permanently poison the login screen.
+      }
+
+      _resetInvisibleTurnstile();
+    }
+
+    return null;
+  }
+
+  Future<String?> _requestTurnstileTokenOnce() async {
     final pending = _captchaCompleter;
     if (pending != null) return pending.future;
+
+    final cachedToken = _turnstileTokenCache.take();
+    if (cachedToken != null) return cachedToken;
+
+    _initializeInvisibleTurnstile();
+    final turnstile = _invisibleTurnstile;
+    final widgetToken = turnstile?.token?.trim();
+    if (widgetToken?.isNotEmpty == true) return widgetToken;
+    if (turnstile == null) return null;
 
     final completer = Completer<String?>();
     _captchaCompleter = completer;
 
     try {
-      final token = await _invisibleTurnstile?.getToken();
+      final token = await Future.any<String?>([
+        turnstile.getToken(),
+        completer.future,
+        Future<String?>.delayed(const Duration(seconds: 10)),
+      ]);
+      _turnstileTokenCache.clear();
       if (!completer.isCompleted) completer.complete(token);
     } catch (error, stackTrace) {
       if (!completer.isCompleted) completer.completeError(error, stackTrace);
@@ -322,7 +371,15 @@ class _LoginScreenState extends State<LoginScreen>
     return completer.future;
   }
 
+  void _resetInvisibleTurnstile() {
+    _turnstileTokenCache.clear();
+    final turnstile = _invisibleTurnstile;
+    _invisibleTurnstile = null;
+    if (turnstile != null) unawaited(turnstile.dispose());
+  }
+
   void _handleCaptchaToken(String token) {
+    _turnstileTokenCache.store(token);
     final completer = _captchaCompleter;
     _captchaCompleter = null;
     if (completer != null && !completer.isCompleted) {
@@ -331,6 +388,7 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   void _handleCaptchaExpired() {
+    _turnstileTokenCache.clear();
     final completer = _captchaCompleter;
     _captchaCompleter = null;
     if (completer != null && !completer.isCompleted) {
@@ -339,6 +397,7 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   void _handleCaptchaTimeout() {
+    _resetInvisibleTurnstile();
     final completer = _captchaCompleter;
     _captchaCompleter = null;
     if (completer != null && !completer.isCompleted) {
@@ -397,8 +456,7 @@ class _LoginScreenState extends State<LoginScreen>
   @override
   void dispose() {
     _captchaCompleter?.complete(null);
-    final turnstile = _invisibleTurnstile;
-    if (turnstile != null) unawaited(turnstile.dispose());
+    _resetInvisibleTurnstile();
     _animController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
